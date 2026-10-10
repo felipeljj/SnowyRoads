@@ -1,0 +1,41 @@
+tab.Main	Schnee
+tab.Appearance	Darstellung
+tab.Advanced	Erweitert
+group.General	Allgemein
+group.Weather	Verkehr und Schneeschmelze
+group.Color	Schneefarbe
+group.Relief	Textur und Schneehaufen
+group.Performance	Leistung
+group.Inspect	Visualisierung
+group.Test	Fehlersuche
+label.Enabled	Schnee auf Straßen aktivieren
+desc.Enabled	Fügt Straßen, Gehwegen und Wegen Schnee hinzu, passend zur Schneedecke der Karte. Standardmäßig aktiviert. Beim Ausschalten werden die Effekte der Mod ausgeblendet.
+label.HideRoadMarkings	Straßenmarkierungen unter Schnee verbergen
+desc.HideRoadMarkings	Angesammelter Schnee verdeckt aufgemalte Linien und Pfeile. Durch Abnutzung oder Schmelzen werden sie wieder sichtbar. Standardmäßig aktiviert. Ausschalten lässt die Markierungen durchscheinen. Straßennamen und Reifenspuren bleiben sichtbar.
+label.TrafficInfluence	Stärke der Abnutzung durch Verkehr
+desc.TrafficInfluence	Höhere Werte lassen den Verkehr Schnee auf befahrenen Spuren schneller abtragen. Neuer Schneefall füllt diese Bereiche allmählich wieder auf. Standard: 70. Bei 0 wird die flächige Abnutzung deaktiviert; einzelne Reifen- und Fußspuren bleiben aktiv.
+label.ResidualMeltHours	Restschnee: maximale Dauer in Stunden
+desc.ResidualMeltHours	Maximale Spielstunden, die kleine Ansammlungen auf Gehwegen und an Bordsteinen verbleiben, nachdem der Schnee auf der Karte verschwunden ist. Wärme kann sie früher schmelzen lassen. Standard: 2 Stunden. Bei 0 verschwinden sie zusammen mit dem Schnee der Karte.
+label.UseGameSnowColor	Schneefarbe des Spiels verwenden
+desc.UseGameSnowColor	Standardmäßig aktiviert. Verwendet die Schneetextur und Schneefarbe des Spiels mit der Beleuchtung der Szene. Ausschalten gibt die Auswahl einer eigenen RGB-Farbe frei.
+label.SnowColor	Eigene Schneefarbe (RGB)
+desc.SnowColor	Wählen Sie den Schneefarbton mit der Farbauswahl. Verfügbar, wenn „Schneefarbe des Spiels verwenden“ ausgeschaltet ist. Die Beleuchtung beeinflusst das Ergebnis weiterhin; Schneehöhe und Schmelzen ändern sich dadurch nicht.
+label.VisibleRelief	Dezentes Texturrelief
+desc.VisibleRelief	Erzeugt kleine Unebenheiten durch die Beleuchtung mit der Schnee-Normalenkarte des Spiels. Standardmäßig aktiviert. Betrifft die Oberflächendetails; dreidimensionale Schneehaufen werden separat eingestellt.
+label.RaisedSnow	Dreidimensionale Schneehaufen
+desc.RaisedSnow	Fügt niedrige Schneehaufen an Bordsteinen und Wegrändern hinzu, passend zu Ansammlung und Schmelzen. Rein optisch, ohne Kollisionen. Standardmäßig aktiviert; im Inneren von Kreuzungen entstehen derzeit keine Haufen.
+label.BankQuality	Detailgrad der Schneehaufen
+desc.BankQuality	Steuert Sichtweite und Geometriedetails naher Schneehaufen. Ausgewogen ist der Standard. Niedrig verringert die Grafiklast; Hoch zeigt mehr Details in größerer Entfernung. Verfügbar bei aktivierten dreidimensionalen Schneehaufen.
+label.MaximumPatches	Limit für nahe Spuren
+desc.MaximumPatches	Begrenzt die gleichzeitig dargestellten Reifen- und Fußspurdetails in Kameranähe. Standard: 64. Erhöhen, falls in belebten Bereichen Spuren fehlen; ein höheres Limit kann Leistung kosten. Steuert nicht die Dunkelheit der Spuren.
+label.ShowSnowDepth	Schneehöhe als Farben anzeigen
+desc.ShowSnowDepth	Ersetzt die normale Darstellung durch die geschätzte sichtbare Schneehöhe: Blau 0–5 mm, Grün 5–15 mm, Gelb 15–30 mm, Rot 30–80 mm. Verändert den Schnee nicht. Ausschalten stellt die normale Darstellung wieder her.
+label.SurfaceOffsetCm	Oberflächenhöhe anpassen (cm)
+desc.SurfaceOffsetCm	Feineinstellung, falls Schnee flackert oder im Asphalt verschwindet. Standard: 2 cm. Nur bei Bedarf erhöhen; zu hohe Werte können den Schnee schweben lassen.
+label.PreviewSnow	Schneevorschau für 30 Sekunden
+desc.PreviewSnow	Startet einen vorübergehenden Darstellungstest, ohne das Wetter der Karte zu ändern. Schaltet sich nach 30 Sekunden automatisch ab. Zum Prüfen tatsächlicher Ansammlung und Schmelze ausgeschaltet lassen.
+label.WriteDiagnostics	Diagnosedatei schreiben
+desc.WriteDiagnostics	Schreibt bei geladener Stadt Wetter-, Darstellungs- und Leistungsdaten nach ModsData/RoadSnow/rendering-diagnostic.txt. Hilfreich zum Melden eines Problems. Die Datei bleibt auf Ihrem PC.
+quality.Low	Niedrig
+quality.Balanced	Ausgewogen
+quality.High	Hoch

@@ -1,0 +1,136 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Configurations>Debug;Release</Configurations>
+    </PropertyGroup>
+    <Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.props" />
+    <Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.targets" />
+    <PropertyGroup>
+        <LangVersion>10</LangVersion>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <Nullable>annotations</Nullable>
+    </PropertyGroup>
+    <ItemGroup>
+        <EmbeddedResource Include="Locales\*.tsv">
+            <LogicalName>RoadSnow.Locales.%(Filename)%(Extension)</LogicalName>
+            <WithCulture>false</WithCulture>
+        </EmbeddedResource>
+        <Compile Include="..\RoadSnow.Core\*.cs" Link="Core\%(Filename)%(Extension)" />
+        <Reference Include="Colossal.PSI.Common">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="UnityEngine.AssetBundleModule">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.Mathematics">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.RenderPipelines.HighDefinition.Runtime">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.RenderPipelines.Core.Runtime">
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+    <ItemGroup>
+        <Reference Include="Game">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.Core">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.Logging">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.IO.AssetDatabase">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.UI">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.UI.Binding">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Colossal.Localization">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.InputSystem">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="UnityEngine.CoreModule">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.Burst">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.Collections">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.Entities">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="Unity.Mathematics">
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+    <ItemGroup>
+        <Reference Update="System">
+            <Private>false</Private>
+        </Reference>
+        <Reference Update="System.Core">
+            <Private>false</Private>
+        </Reference>
+        <Reference Update="System.Data">
+            <Private>false</Private>
+        </Reference>
+    </ItemGroup>
+    <ItemGroup>
+        <None Include="$(ModPropsFile)" Link="Properties\Mod.props" />
+        <None Include="$(ModTargetsFile)" Link="Properties\Mod.targets" />
+    </ItemGroup>
+    <PropertyGroup>
+        <RoadSnowRepositoryRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RoadSnowRepositoryRoot>
+        <RoadSnowPrivateRuntime>$(RoadSnowRepositoryRoot)\.cache\dotnet6</RoadSnowPrivateRuntime>
+        <RoadSnowToolEnvironment
+            Condition="Exists('$(RoadSnowPrivateRuntime)\shared\Microsoft.NETCore.App\6.0.36\System.Private.CoreLib.dll')"
+            >DOTNET_ROOT=$(RoadSnowPrivateRuntime);DOTNET_ROOT_X64=$(RoadSnowPrivateRuntime)</RoadSnowToolEnvironment>
+    </PropertyGroup>
+    <ItemGroup>
+        <RoadSnowPackageAsset Include="$(RoadSnowRepositoryRoot)\assets\roadsnow-shaders" />
+        <RoadSnowPackageAsset Include="$(MSBuildProjectDirectory)\UI\RoadSnow.Options.mjs" />
+        <RoadSnowPackageAsset Include="$(RoadSnowRepositoryRoot)\shaders\UNITY-NOTICE.txt" />
+    </ItemGroup>
+    <Target
+        Name="ValidateRoadSnowPackageAssets"
+        BeforeTargets="BeforeBuild"
+        Condition="'$(NeedBuild)' != 'false'"
+    >
+        <Error
+            Condition="!Exists('%(RoadSnowPackageAsset.Identity)')"
+            Text="Required RoadSnow package file is missing: %(RoadSnowPackageAsset.Identity)"
+        />
+    </Target>
+    <Target
+        Name="DeployRoadSnowPackageAssets"
+        AfterTargets="DeployWIP"
+        Condition="'$(NeedBuild)' == 'true'"
+    >
+        <Copy SourceFiles="@(RoadSnowPackageAsset)" DestinationFolder="$(DeployDir)" />
+    </Target>
+    <Target
+        Name="RunModPostProcessor"
+        AfterTargets="AfterBuild"
+        BeforeTargets="DeployWIP"
+        DependsOnTargets="ModPostProcessorConfig"
+        Condition="'$(NeedBuild)'"
+    >
+        <Error
+            Condition="!Exists('$(ModPostProcessorFullPath)')"
+            Text="Post processor not found: $(ModPostProcessorFullPath)"
+        />
+        <Exec
+            Command="$(ModPostProcessorArgs)"
+            EnvironmentVariables="$(RoadSnowToolEnvironment)"
+            LogStandardErrorAsError="true"
+        />
+    </Target>
+</Project>

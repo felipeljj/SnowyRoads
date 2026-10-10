@@ -1,0 +1,41 @@
+tab.Main	Snow
+tab.Appearance	Appearance
+tab.Advanced	Advanced
+group.General	General
+group.Weather	Traffic and melting
+group.Color	Snow color
+group.Relief	Texture and snowbanks
+group.Performance	Performance
+group.Inspect	Visualization
+group.Test	Troubleshooting
+label.Enabled	Enable road snow
+desc.Enabled	Adds snow to roads, sidewalks and paths, following the map's snow cover. Enabled by default. Turning this off hides the mod's effects.
+label.HideRoadMarkings	Hide road markings under snow
+desc.HideRoadMarkings	Accumulated snow covers painted lines and arrows; they reappear as snow wears or melts. Enabled by default. Turning this off lets paint show through. Street names and tire tracks remain visible.
+label.TrafficInfluence	Traffic wear strength
+desc.TrafficInfluence	Higher values let traffic clear snow from traveled lanes faster. Fresh snowfall gradually fills the worn areas. Default: 70. At 0, broad lane wear is disabled; individual tire tracks and footprints still work.
+label.ResidualMeltHours	Remaining snow: maximum hours
+desc.ResidualMeltHours	Maximum in-game hours that small sidewalk and curb accumulations remain after the map loses its snow. Heat can melt them sooner. Default: 2 hours. At 0, they disappear with the map's snow.
+label.UseGameSnowColor	Use the game's snow color
+desc.UseGameSnowColor	Enabled by default. Uses the game's snow texture and color under the scene's lighting. Turn this off to unlock the custom RGB color picker.
+label.SnowColor	Custom snow color (RGB)
+desc.SnowColor	Choose a snow tint with the color picker. Available when “Use the game's snow color” is off. Lighting still affects the result; this changes neither snow depth nor melting.
+label.VisibleRelief	Subtle texture relief
+desc.VisibleRelief	Adds small bumps through shading, using the game's snow normal map. Enabled by default. This affects surface detail; raised snowbanks are controlled separately.
+label.RaisedSnow	Raised snowbanks
+desc.RaisedSnow	Adds low, three-dimensional snowbanks near curbs and path edges, following accumulation and melting. Cosmetic only, with no collisions. Enabled by default; junction interiors currently have no banks.
+label.BankQuality	Snowbank detail
+desc.BankQuality	Controls how far nearby snowbanks are drawn and their mesh detail. Balanced is the default. Low reduces graphics work; High shows more detail farther away. Available when raised snowbanks are enabled.
+label.MaximumPatches	Nearby track budget
+desc.MaximumPatches	Limits the amount of nearby tire and footprint detail drawn at once. Default: 64. Increase if marks are missing in busy areas; a higher budget can cost performance. This does not control track darkness.
+label.ShowSnowDepth	Show snow depth colors
+desc.ShowSnowDepth	Replaces the normal appearance with estimated visual depth: blue 0–5 mm, green 5–15 mm, yellow 15–30 mm, red 30–80 mm. Does not change the snow. Turn off to restore its normal appearance.
+label.SurfaceOffsetCm	Surface height adjustment (cm)
+desc.SurfaceOffsetCm	Fine adjustment for snow that flickers or sinks into pavement. Default: 2 cm. Increase only if needed; excessive values can make the snow appear to float.
+label.PreviewSnow	Preview snow for 30 seconds
+desc.PreviewSnow	Runs a temporary visual test without changing the map's weather. Switches off automatically after 30 seconds. Leave off when checking real accumulation and melting.
+label.WriteDiagnostics	Write diagnostic file
+desc.WriteDiagnostics	With a city loaded, writes weather, rendering and performance details to ModsData/RoadSnow/rendering-diagnostic.txt. Use when reporting a problem. The file stays on your PC.
+quality.Low	Low
+quality.Balanced	Balanced
+quality.High	High

@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+artifacts/
+*.user
+*.suo
+.vs/
+.cache/
+GameAssemblies/
+
+**/Library/
+**/Logs/
+**/Temp/
+**/.vs/

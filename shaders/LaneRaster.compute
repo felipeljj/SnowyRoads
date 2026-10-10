@@ -1,0 +1,68 @@
+#pragma kernel Clear
+#pragma kernel Raster
+struct Quad { float4 a,b,c,d,shape; };
+StructuredBuffer<Quad> _Quads;
+RWTexture2D<uint> _Output;
+float4 _Area;
+
+float LaneHash(float2 p) { p=frac(p*float2(.1031,.11369)); p+=dot(p,p.yx+19.19); return frac((p.x+p.y)*p.x); }
+float LaneNoise(float2 p) {
+    float2 i=floor(p),f=frac(p); f=f*f*(3-2*f);
+    return lerp(lerp(LaneHash(i),LaneHash(i+float2(1,0)),f.x),lerp(LaneHash(i+float2(0,1)),LaneHash(i+1),f.x),f.y);
+}
+[numthreads(8,8,1)]
+void Clear(uint3 id:SV_DispatchThreadID) { _Output[id.xy]=0; }
+
+bool Triangle(float2 p,float4 a,float4 b,float4 c,float3 sides,out float height,out float pressure,out float side) {
+    float2 ab=b.xz-a.xz, ac=c.xz-a.xz, ap=p-a.xz;
+    float det=ab.x*ac.y-ab.y*ac.x;
+    height=pressure=side=0;
+    if(abs(det)<.00001) return false;
+    float u=(ap.x*ac.y-ap.y*ac.x)/det, v=(ab.x*ap.y-ab.y*ap.x)/det;
+    if(u<-.0001 || v<-.0001 || u+v>1.0001) return false;
+    float3 bary=float3(1-u-v,u,v);
+    height=dot(bary,float3(a.y,b.y,c.y));
+    pressure=dot(bary,float3(a.w,b.w,c.w));
+    side=dot(bary,sides);
+    return true;
+}
+[numthreads(8,8,1)]
+void Raster(uint3 group:SV_GroupID,uint3 thread:SV_GroupThreadID) {
+    Quad q=_Quads[group.x];
+    float2 lo=min(min(q.a.xz,q.b.xz),min(q.c.xz,q.d.xz));
+    float2 hi=max(max(q.a.xz,q.b.xz),max(q.c.xz,q.d.xz));
+    int2 begin=max(0,(int2)floor((lo-_Area.xy)*_Area.z*2048));
+    int2 end=min(2047,(int2)ceil((hi-_Area.xy)*_Area.z*2048));
+    for(int y=begin.y+thread.y;y<=end.y;y+=8)
+    for(int x=begin.x+thread.x;x<=end.x;x+=8) {
+        float2 p=_Area.xy+(float2(x,y)+.5)/(2048*_Area.z);
+        float h,pressure,side;
+
+        bool covered=Triangle(p,q.a,q.c,q.b,float3(-1,-1,1),h,pressure,side);
+        [branch] if(!covered) covered=Triangle(p,q.b,q.c,q.d,float3(1,-1,1),h,pressure,side);
+        if(!covered) continue;
+        float broad=LaneNoise(p*.23), grain=LaneNoise(p*1.7+17.3);
+
+        float detail=1-smoothstep(.10,.28,1/(2048*_Area.z));
+        float crust=lerp(.5,LaneNoise(p*5.4-9.1),detail);
+        float irregular=.55*broad+.30*grain+.15*crust;
+        float shifted=abs(side+(broad-.5)*.12);
+
+        float boundary=.70+.13*broad+(grain-.5)*.19+(crust-.5)*.10;
+        float feather=lerp(.12,.055,detail);
+        float edge=1-smoothstep(boundary-feather,boundary+feather,shifted);
+        float rut=exp(-pow((shifted*q.shape.x*.5-(.67+.10*broad)) / (.25+.07*grain),2));
+        float spread=lerp(.30,1,smoothstep(.15,.85,pressure));
+
+        float clumps=lerp(.48+.52*irregular,1,smoothstep(.75,1,pressure));
+
+        float fragments=smoothstep(.57,.76,.65*grain+.35*crust)*smoothstep(.20,.38,shifted)
+            *(1-smoothstep(.48,.64,shifted));
+        clumps*=1-fragments*.10;
+        uint wear=(uint)round(255*.95*saturate(pressure)*edge*lerp(spread,1,rut)*clumps);
+        if(wear==0) continue;
+        uint encodedHeight=(uint)clamp(round((h+1024)*20),0,16777215);
+        uint previous;
+        InterlockedMax(_Output[int2(x,y)],(encodedHeight<<8)|wear,previous);
+    }
+}

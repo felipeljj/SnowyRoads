@@ -1,0 +1,41 @@
+tab.Main	Neige
+tab.Appearance	Apparence
+tab.Advanced	Avancé
+group.General	Général
+group.Weather	Circulation et fonte
+group.Color	Couleur de la neige
+group.Relief	Texture et amas
+group.Performance	Performances
+group.Inspect	Visualisation
+group.Test	Diagnostic
+label.Enabled	Activer la neige sur les routes
+desc.Enabled	Ajoute de la neige sur les routes, trottoirs et chemins, selon l'enneigement de la carte. Activé par défaut. Désactiver cette option masque les effets du mod.
+label.HideRoadMarkings	Masquer le marquage routier sous la neige
+desc.HideRoadMarkings	La neige accumulée recouvre les lignes et flèches peintes ; elles réapparaissent avec l'usure ou la fonte. Activé par défaut. Désactivez cette option pour laisser transparaître le marquage. Les noms de rues et les traces restent visibles.
+label.TrafficInfluence	Intensité de l'usure par la circulation
+desc.TrafficInfluence	Une valeur élevée permet à la circulation de dégager plus vite la neige des voies empruntées. De nouvelles chutes de neige comblent progressivement les zones usées. Par défaut : 70. À 0, l'usure générale des voies est désactivée ; les traces individuelles de pneus et de pas restent actives.
+label.ResidualMeltHours	Neige résiduelle : durée maximale en heures
+desc.ResidualMeltHours	Nombre maximal d'heures de jeu pendant lesquelles de petits amas persistent sur les trottoirs et les bordures après la fonte sur la carte. La chaleur peut accélérer leur fonte. Par défaut : 2 heures. À 0, ils disparaissent avec la neige de la carte.
+label.UseGameSnowColor	Utiliser la couleur de neige du jeu
+desc.UseGameSnowColor	Activé par défaut. Utilise la texture et la couleur de neige du jeu, avec l'éclairage de la scène. Désactivez cette option pour accéder au sélecteur de couleur RVB personnalisée.
+label.SnowColor	Couleur personnalisée de la neige (RVB)
+desc.SnowColor	Choisissez la teinte de la neige avec le sélecteur de couleur. Disponible lorsque « Utiliser la couleur de neige du jeu » est désactivé. L'éclairage influence toujours le résultat ; la couleur ne change ni l'épaisseur ni la fonte.
+label.VisibleRelief	Relief discret de la texture
+desc.VisibleRelief	Ajoute de petites irrégularités par l'éclairage, grâce à la carte de normales de la neige du jeu. Activé par défaut. Modifie le détail de surface ; les amas en volume disposent d'une option distincte.
+label.RaisedSnow	Amas de neige en volume
+desc.RaisedSnow	Ajoute de petits amas en trois dimensions le long des bordures et des chemins, selon l'accumulation et la fonte. Effet visuel sans collisions. Activé par défaut ; l'intérieur des carrefours ne reçoit pas encore d'amas.
+label.BankQuality	Détail des amas
+desc.BankQuality	Règle la distance d'affichage des amas proches et le détail de leur géométrie. Équilibré est le réglage par défaut. Faible réduit la charge graphique ; Élevé affiche davantage de détails à plus grande distance. Disponible lorsque les amas en volume sont activés.
+label.MaximumPatches	Limite des traces proches
+desc.MaximumPatches	Limite le détail des traces de pneus et de pas affichées simultanément près de la caméra. Par défaut : 64. Augmentez si des traces manquent dans les zones fréquentées ; une limite élevée peut réduire les performances. Ne règle pas l'obscurité des traces.
+label.ShowSnowDepth	Afficher l'épaisseur par couleurs
+desc.ShowSnowDepth	Remplace l'apparence normale par l'épaisseur visuelle estimée : bleu 0–5 mm, vert 5–15 mm, jaune 15–30 mm, rouge 30–80 mm. Ne modifie pas la neige. Désactivez pour retrouver son apparence normale.
+label.SurfaceOffsetCm	Ajustement de la hauteur de surface (cm)
+desc.SurfaceOffsetCm	Réglage fin si la neige scintille ou s'enfonce dans la chaussée. Par défaut : 2 cm. Augmentez uniquement si nécessaire ; une valeur excessive peut donner l'impression que la neige flotte.
+label.PreviewSnow	Aperçu de neige pendant 30 secondes
+desc.PreviewSnow	Lance un test visuel temporaire sans modifier la météo de la carte. Se désactive automatiquement après 30 secondes. Laissez désactivé pour vérifier l'accumulation et la fonte réelles.
+label.WriteDiagnostics	Enregistrer un fichier de diagnostic
+desc.WriteDiagnostics	Lorsqu'une ville est chargée, enregistre les données météo, de rendu et de performances dans ModsData/RoadSnow/rendering-diagnostic.txt. À utiliser pour signaler un problème. Le fichier reste sur votre PC.
+quality.Low	Faible
+quality.Balanced	Équilibré
+quality.High	Élevé

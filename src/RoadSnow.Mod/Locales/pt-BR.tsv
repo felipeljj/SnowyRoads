@@ -1,0 +1,41 @@
+tab.Main	Neve
+tab.Appearance	Aparência
+tab.Advanced	Avançado
+group.General	Geral
+group.Weather	Tráfego e degelo
+group.Color	Cor da neve
+group.Relief	Textura e montes
+group.Performance	Desempenho
+group.Inspect	Visualização
+group.Test	Diagnóstico
+label.Enabled	Ativar neve nas ruas
+desc.Enabled	Adiciona neve às ruas, calçadas e caminhos, acompanhando a cobertura de neve do mapa. Ativado por padrão. Ao desligar, oculta os efeitos do mod.
+label.HideRoadMarkings	Ocultar pintura sob a neve
+desc.HideRoadMarkings	A neve acumulada cobre linhas e setas pintadas; elas reaparecem com o desgaste ou degelo. Ativado por padrão. Desligue para deixar a pintura transparecer. Nomes de ruas e rastros continuam visíveis.
+label.TrafficInfluence	Intensidade do desgaste por tráfego
+desc.TrafficInfluence	Valores maiores fazem o tráfego remover neve das faixas usadas mais rapidamente. Uma nova nevada preenche o desgaste aos poucos. Padrão: 70. Em 0, desativa o desgaste amplo das faixas; rastros individuais de pneus e pegadas continuam funcionando.
+label.ResidualMeltHours	Restos de neve: duração máxima em horas
+desc.ResidualMeltHours	Máximo de horas do jogo que pequenos acúmulos nas calçadas e meios-fios permanecem após a neve sumir do mapa. O calor pode derretê-los antes. Padrão: 2 horas. Em 0, somem junto com a neve do mapa.
+label.UseGameSnowColor	Usar a cor da neve do jogo
+desc.UseGameSnowColor	Ativado por padrão. Usa a textura e a cor da neve do próprio jogo, com a iluminação da cena. Desligue para liberar o seletor de cor RGB personalizada.
+label.SnowColor	Cor personalizada da neve (RGB)
+desc.SnowColor	Escolha a tonalidade da neve no seletor de cor. Disponível quando “Usar a cor da neve do jogo” estiver desligado. A iluminação ainda afeta o resultado; a cor não altera a profundidade nem o degelo.
+label.VisibleRelief	Relevo sutil da textura
+desc.VisibleRelief	Cria pequenas irregularidades pela iluminação, usando o mapa de relevo da neve do jogo. Ativado por padrão. Altera o detalhe da superfície; os montes elevados têm uma opção separada.
+label.RaisedSnow	Montes elevados de neve
+desc.RaisedSnow	Adiciona montes baixos em três dimensões perto dos meios-fios e bordas de caminhos, acompanhando o acúmulo e o degelo. Efeito visual, sem colisões. Ativado por padrão; ainda não cria montes no interior dos cruzamentos.
+label.BankQuality	Detalhe dos montes
+desc.BankQuality	Controla a distância de exibição dos montes próximos e o detalhe da geometria. Equilibrado é o padrão. Baixo reduz o trabalho gráfico; Alto exibe mais detalhe a uma distância maior. Disponível com os montes elevados ativados.
+label.MaximumPatches	Limite de rastros próximos
+desc.MaximumPatches	Limita a quantidade de detalhes de pneus e pegadas desenhada de uma vez perto da câmera. Padrão: 64. Aumente se faltarem marcas em áreas movimentadas; limites maiores podem pesar no desempenho. Não controla o quanto os rastros ficam escuros.
+label.ShowSnowDepth	Mostrar profundidade por cores
+desc.ShowSnowDepth	Substitui a aparência normal pela profundidade visual estimada: azul 0–5 mm, verde 5–15 mm, amarelo 15–30 mm, vermelho 30–80 mm. Não altera a neve. Desligue para voltar à aparência normal.
+label.SurfaceOffsetCm	Ajuste de altura da superfície (cm)
+desc.SurfaceOffsetCm	Ajuste fino para neve que pisca ou fica escondida no asfalto. Padrão: 2 cm. Aumente apenas se necessário; valores excessivos podem fazer a neve parecer suspensa.
+label.PreviewSnow	Prévia de neve por 30 segundos
+desc.PreviewSnow	Executa um teste visual temporário sem mudar o clima do mapa. Desliga automaticamente após 30 segundos. Mantenha desligado ao verificar o acúmulo e o degelo reais.
+label.WriteDiagnostics	Gravar arquivo de diagnóstico
+desc.WriteDiagnostics	Com uma cidade carregada, grava dados de clima, renderização e desempenho em ModsData/RoadSnow/rendering-diagnostic.txt. Use ao relatar um problema. O arquivo fica no seu PC.
+quality.Low	Baixo
+quality.Balanced	Equilibrado
+quality.High	Alto

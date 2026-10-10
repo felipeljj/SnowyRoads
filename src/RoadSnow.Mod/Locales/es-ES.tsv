@@ -1,0 +1,41 @@
+tab.Main	Nieve
+tab.Appearance	Aspecto
+tab.Advanced	Avanzado
+group.General	General
+group.Weather	Tráfico y deshielo
+group.Color	Color de la nieve
+group.Relief	Textura y montículos
+group.Performance	Rendimiento
+group.Inspect	Visualización
+group.Test	Diagnóstico
+label.Enabled	Activar nieve en las calles
+desc.Enabled	Añade nieve a calles, aceras y caminos, siguiendo la cobertura de nieve del mapa. Activado por defecto. Al desactivarlo, se ocultan los efectos del mod.
+label.HideRoadMarkings	Ocultar marcas viales bajo la nieve
+desc.HideRoadMarkings	La nieve acumulada cubre las líneas y flechas pintadas; reaparecen con el desgaste o el deshielo. Activado por defecto. Desactívalo para que la pintura se vea a través de la nieve. Los nombres de las calles y las huellas siguen visibles.
+label.TrafficInfluence	Intensidad del desgaste por tráfico
+desc.TrafficInfluence	Los valores altos hacen que el tráfico retire más rápido la nieve de los carriles usados. Una nueva nevada rellena el desgaste gradualmente. Por defecto: 70. En 0, se desactiva el desgaste general de los carriles; las huellas individuales de neumáticos y peatones siguen funcionando.
+label.ResidualMeltHours	Restos de nieve: duración máxima en horas
+desc.ResidualMeltHours	Máximo de horas del juego que permanecen pequeñas acumulaciones en aceras y bordillos tras desaparecer la nieve del mapa. El calor puede derretirlas antes. Por defecto: 2 horas. En 0, desaparecen junto con la nieve del mapa.
+label.UseGameSnowColor	Usar el color de nieve del juego
+desc.UseGameSnowColor	Activado por defecto. Usa la textura y el color de nieve del propio juego con la iluminación de la escena. Desactívalo para habilitar el selector de color RGB personalizado.
+label.SnowColor	Color personalizado de la nieve (RGB)
+desc.SnowColor	Elige el tono de la nieve con el selector de color. Disponible al desactivar «Usar el color de nieve del juego». La iluminación sigue afectando al resultado; el color no cambia la profundidad ni el deshielo.
+label.VisibleRelief	Relieve sutil de la textura
+desc.VisibleRelief	Añade pequeñas irregularidades mediante la iluminación, usando el mapa de normales de la nieve del juego. Activado por defecto. Afecta al detalle de la superficie; los montículos elevados se controlan por separado.
+label.RaisedSnow	Montículos de nieve elevados
+desc.RaisedSnow	Añade pequeños montículos tridimensionales junto a bordillos y bordes de caminos, siguiendo la acumulación y el deshielo. Efecto visual sin colisiones. Activado por defecto; aún no crea montículos dentro de los cruces.
+label.BankQuality	Detalle de los montículos
+desc.BankQuality	Controla la distancia de dibujado de los montículos cercanos y el detalle de su geometría. Equilibrado es el valor predeterminado. Bajo reduce el trabajo gráfico; Alto muestra más detalle a mayor distancia. Disponible con los montículos elevados activados.
+label.MaximumPatches	Límite de huellas cercanas
+desc.MaximumPatches	Limita el detalle de huellas de neumáticos y peatones dibujado a la vez cerca de la cámara. Por defecto: 64. Auméntalo si faltan huellas en zonas concurridas; un límite alto puede reducir el rendimiento. No controla la oscuridad de las huellas.
+label.ShowSnowDepth	Mostrar profundidad por colores
+desc.ShowSnowDepth	Sustituye el aspecto normal por la profundidad visual estimada: azul 0–5 mm, verde 5–15 mm, amarillo 15–30 mm, rojo 30–80 mm. No modifica la nieve. Desactívalo para recuperar su aspecto normal.
+label.SurfaceOffsetCm	Ajuste de altura de la superficie (cm)
+desc.SurfaceOffsetCm	Ajuste fino para nieve que parpadea o queda oculta en el asfalto. Por defecto: 2 cm. Auméntalo solo si hace falta; valores excesivos pueden hacer que la nieve parezca flotar.
+label.PreviewSnow	Vista previa de nieve durante 30 segundos
+desc.PreviewSnow	Ejecuta una prueba visual temporal sin cambiar el clima del mapa. Se desactiva automáticamente tras 30 segundos. Déjala desactivada al comprobar la acumulación y el deshielo reales.
+label.WriteDiagnostics	Guardar archivo de diagnóstico
+desc.WriteDiagnostics	Con una ciudad cargada, guarda datos del clima, renderizado y rendimiento en ModsData/RoadSnow/rendering-diagnostic.txt. Úsalo al informar de un problema. El archivo permanece en tu PC.
+quality.Low	Bajo
+quality.Balanced	Equilibrado
+quality.High	Alto
