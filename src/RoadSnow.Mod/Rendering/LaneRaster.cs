@@ -9,8 +9,8 @@ namespace RoadSnow.Mod;
 
 internal sealed class LaneRaster : IDisposable
 {
-    public const int Size = 2048;
-    public const int MaximumQuads = 32768;
+    public const int Size = 1024;
+    public const int MaximumQuads = 65536;
     private readonly ComputeShader _shader;
     private readonly List<Quad> _quads = new();
     private ComputeBuffer _buffer;
@@ -21,11 +21,16 @@ internal sealed class LaneRaster : IDisposable
     private float _probePressure;
     private bool _probePending;
     private bool _disposed;
+    private readonly string _binding;
     public RenderTexture Texture { get; }
     public int Count => _quads.Count;
 
-    public LaneRaster(ComputeShader shader)
+    public LaneRaster(ComputeShader shader, bool distant = false, bool detail = false)
     {
+        _binding =
+            detail ? "_RoadSnowDetailLane"
+            : distant ? "_RoadSnowDistantLane"
+            : "_RoadSnowLane";
         if (shader == null || !SystemInfo.supportsComputeShaders)
         {
             throw new InvalidOperationException("RoadSnow lane compute shader unavailable.");
@@ -41,7 +46,8 @@ internal sealed class LaneRaster : IDisposable
                 depthBufferBits = 0,
                 enableRandomWrite = true,
                 msaaSamples = 1,
-                volumeDepth = 1,
+                dimension = TextureDimension.Tex2DArray,
+                volumeDepth = 4,
             }
         )
         {
@@ -51,8 +57,8 @@ internal sealed class LaneRaster : IDisposable
         Texture.Create();
         _shader.SetTexture(_clear, "_Output", Texture);
         _shader.SetTexture(_raster, "_Output", Texture);
-        Shader.SetGlobalTexture("_RoadSnowLanePacked", Texture);
-        Shader.SetGlobalVector("_RoadSnowLaneArea", Vector4.zero);
+        Shader.SetGlobalTexture(_binding + "Packed", Texture);
+        Shader.SetGlobalVector(_binding + "Area", Vector4.zero);
     }
 
     public void Begin()
@@ -61,7 +67,16 @@ internal sealed class LaneRaster : IDisposable
         _probePressure = 0;
     }
 
-    public void Add(Vector3 a, Vector3 b, Vector3 c, Vector3 d, float start, float end, float width)
+    public void Add(
+        Vector3 a,
+        Vector3 b,
+        Vector3 c,
+        Vector3 d,
+        float start,
+        float end,
+        float width,
+        bool rail = false
+    )
     {
         if (_quads.Count >= MaximumQuads)
         {
@@ -75,7 +90,7 @@ internal sealed class LaneRaster : IDisposable
                 B = new Vector4(b.x, b.y, b.z, start),
                 C = new Vector4(c.x, c.y, c.z, end),
                 D = new Vector4(d.x, d.y, d.z, end),
-                Shape = new Vector4(width, 0, 0, 0),
+                Shape = new Vector4(width, rail ? 1 : 0, 0, 0),
             }
         );
         if ((start + end) * .5f > _probePressure)
@@ -89,7 +104,7 @@ internal sealed class LaneRaster : IDisposable
     {
         _area = area;
         _shader.SetVector("_Area", area);
-        _shader.Dispatch(_clear, Size / 8, Size / 8, 1);
+        _shader.Dispatch(_clear, Size / 8, Size / 8, 4);
         if (_quads.Count > 0)
         {
             if (_buffer == null || _buffer.count < _quads.Count)
@@ -103,8 +118,8 @@ internal sealed class LaneRaster : IDisposable
             _shader.Dispatch(_raster, _quads.Count, 1, 1);
         }
 
-        Shader.SetGlobalTexture("_RoadSnowLanePacked", Texture);
-        Shader.SetGlobalVector("_RoadSnowLaneArea", area);
+        Shader.SetGlobalTexture(_binding + "Packed", Texture);
+        Shader.SetGlobalVector(_binding + "Area", area);
     }
 
     public void ProbeGpu(Action<string> report)
@@ -158,7 +173,7 @@ internal sealed class LaneRaster : IDisposable
     public void Dispose()
     {
         _disposed = true;
-        Shader.SetGlobalVector("_RoadSnowLaneArea", Vector4.zero);
+        Shader.SetGlobalVector(_binding + "Area", Vector4.zero);
         _buffer?.Dispose();
         Texture.Release();
         Object.Destroy(Texture);

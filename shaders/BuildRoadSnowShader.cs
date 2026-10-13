@@ -59,6 +59,18 @@ public static class BuildRoadSnowShader
         }
 
         data = "#include \"Assets/RoadSnow/SnowCommon.hlsl\"\n" + data;
+        // Override the probe before HDRP applies its material response and the
+        // scene's indirect-light multiplier. A max with old renderer lighting
+        // kept daylight on the snow after the sky had already turned dark.
+        string builtin = File.ReadAllText(package + "LitBuiltinData.hlsl");
+        const string postInit = "PostInitBuiltinData(V, posInput, surfaceData, builtinData);";
+        if (!builtin.Contains(postInit)) throw new Exception("Missing native GI initialization.");
+        builtin = builtin.Replace(postInit, @"
+    builtinData.bakeDiffuseLighting = SnowAmbient(bentNormalWS);
+    builtinData.backBakeDiffuseLighting = SnowAmbient(-input.tangentToWorld[2]);
+    " + postInit);
+        File.WriteAllText("Assets/RoadSnow/SnowBuiltinData.hlsl", builtin);
+        data = data.Replace(package + "LitBuiltinData.hlsl", "Assets/RoadSnow/SnowBuiltinData.hlsl");
         string meshModification = File.ReadAllText(package + "LitDataMeshModification.hlsl");
         const string vertexAnchor =
             "void ApplyVertexModification(AttributesMesh input, float3 normalWS, inout float3 positionRWS, float3 timeParameters)";
@@ -74,7 +86,7 @@ public static class BuildRoadSnowShader
             @"
 #if defined(ROADSNOW_BANKS)
     float3 bankBase=GetAbsolutePositionWS(positionRWS); bankBase.y=input.uv2.x;
-    float4 bankMetadata=SAMPLE_TEXTURE2D_LOD(_BaseColorMap,sampler_BaseColorMap,input.uv0.xy,0);
+    float4 bankMetadata=float4(input.uv3.x,1,0,input.uv3.y);
     positionRWS.y+=input.uv2.y*(SnowBankScale(bankBase,bankMetadata)-1);
 #endif
 "
@@ -93,7 +105,14 @@ public static class BuildRoadSnowShader
 #if defined(ROADSNOW_BANKS)
     snowSamplePosition.y=input.texCoord2.x;
 #endif
+#if defined(ROADSNOW_BANKS)
+    float4 snowMetadata = float4(input.texCoord3.x,1,0,input.texCoord3.y);
+#else
     float4 snowMetadata = SAMPLE_UVMAPPING_TEXTURE2D(_BaseColorMap, sampler_BaseColorMap, layerTexCoord.base);
+#endif
+#if defined(ROADSNOW_CACHE)
+    clip(snowMetadata.a - .5);
+#endif
     float snowDepth, retainedDepth, fineWear;
     alpha = SnowCoverage(snowSamplePosition, snowMetadata, snowDepth, retainedDepth, fineWear) * _BaseColor.a;
 #if defined(ROADSNOW_BANKS)
@@ -103,8 +122,13 @@ public static class BuildRoadSnowShader
 #elif defined(ROADSNOW_FACILITY)
     alpha=SnowFacilityOpacity(snowSamplePosition,fineWear);
 #endif
+#if defined(ROADSNOW_PLOW)
+    alpha = smoothstep(.0003,.003,input.texCoord2.y);
+    fineWear = 0;
+    retainedDepth = 0;
+#endif
     clip(alpha - 0.001);
-    float3 snowTex = SAMPLE_TEXTURE2D(_RoadSnowAlbedo, s_linear_repeat_sampler, absolutePosition.xz * .5).rgb;
+    float3 snowTex = SnowTexture(absolutePosition.xz);
     surfaceData.baseColor = _RoadSnowUseNativeColor > .5 ? snowTex : _BaseColor.rgb * lerp(.85,1.05,saturate(dot(snowTex,float3(.2126,.7152,.0722))));
     surfaceData.baseColor *= SnowTrackTint(fineWear);
 #if defined(ROADSNOW_FACILITY)
@@ -124,20 +148,22 @@ public static class BuildRoadSnowShader
     float2 snowP = absolutePosition.xz;
     float footprint = max(length(ddx(snowP)), length(ddy(snowP)));
     float detailFade = 1 - smoothstep(.10, .5, footprint);
-    float3 nativeNormal = UnpackNormalmapRGorAG(SAMPLE_TEXTURE2D(_RoadSnowNormal, s_linear_repeat_sampler, snowP * .5));
-    float3 bump = float3(nativeNormal.x,0,nativeNormal.y) * (.35 * detailFade * _RoadSnowHasNormal);
+    float3 nativeNormal = UnpackNormalmapRGorAG(SAMPLE_TEXTURE2D(_RoadSnowNormal, s_linear_repeat_sampler, snowP * .03));
+    float3 bump = float3(nativeNormal.x,0,nativeNormal.y) * (detailFade * _RoadSnowHasNormal);
 #if defined(ROADSNOW_BANKS)
-    surfaceData.normalWS=normalize(lerp(float3(0,1,0),surfaceData.normalWS,bankScale));
+    float3 bankNormal=normalize(cross(ddy(absolutePosition),ddx(absolutePosition)));
+    surfaceData.normalWS=bankNormal.y<0?-bankNormal:bankNormal;
 #endif
     float3 dpdx=ddx(absolutePosition), dpdy=ddy(absolutePosition);
     float3 rx=cross(dpdy,surfaceData.normalWS), ry=cross(surfaceData.normalWS,dpdx);
     float determinant=dot(dpdx,rx);
     float bankHeight=min(.03,retainedDepth*.001);
+    bankHeight+=SnowImpressionRelief(snowSamplePosition,fineWear)*smoothstep(.2,5,snowDepth);
     float3 gradient=(ddx(bankHeight)*rx+ddy(bankHeight)*ry)*sign(determinant)/max(.00001,abs(determinant));
     bump -= clamp(gradient,-.2,.2);
     bump -= surfaceData.normalWS * dot(bump,surfaceData.normalWS);
     surfaceData.normalWS = normalize(surfaceData.normalWS + bump * _RoadSnowRelief);
-    surfaceData.perceptualSmoothness = .18 + .12 * detailFade * saturate(nativeNormal.z) + .12 * (1-saturate(snowDepth/10));
+    surfaceData.perceptualSmoothness = .35 + .20 * SAMPLE_TEXTURE2D(_RoadSnowAlbedo,s_linear_repeat_sampler,snowP*.03).a;
 " + normalAnchor
         );
         const string builtinLine =
@@ -151,8 +177,6 @@ public static class BuildRoadSnowShader
             builtinLine,
             builtinLine
                 + @"
-    builtinData.bakeDiffuseLighting = max(builtinData.bakeDiffuseLighting,
-        max(0,EvaluateAmbientProbe(surfaceData.normalWS)) * surfaceData.baseColor * surfaceData.ambientOcclusion);
     if (_RoadSnowDepthView > .5) {
         surfaceData.baseColor = 0;
         builtinData.bakeDiffuseLighting = 0;
@@ -233,11 +257,14 @@ public static class BuildRoadSnowShader
         source = source.Replace("#define USE_FPTL_LIGHTLIST", "");
         Directory.CreateDirectory("Assets/RoadSnow");
         File.WriteAllText("Assets/RoadSnow/Surface.shader", source);
+        File.WriteAllText("Assets/RoadSnow/CachedSurface.shader",
+            source.Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/CachedSurface\"")
+                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_CACHE"));
         File.WriteAllText(
             "Assets/RoadSnow/Banks.shader",
             source
                 .Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/Banks\"")
-                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define _REQUIRE_UV2")
+                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define _REQUIRE_UV2\n#define _REQUIRE_UV3")
         );
         File.WriteAllText(
             "Assets/RoadSnow/Facility.shader",
@@ -245,6 +272,9 @@ public static class BuildRoadSnowShader
                 .Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/Facility\"")
                 .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_FACILITY")
         );
+        File.WriteAllText("Assets/RoadSnow/PlowBanks.shader",
+            source.Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/PlowBanks\"")
+                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define ROADSNOW_PLOW\n#define _REQUIRE_UV2\n#define _REQUIRE_UV3"));
         AssetDatabase.Refresh();
         var shader = AssetDatabase.LoadAssetAtPath<Shader>("Assets/RoadSnow/Surface.shader");
         if (shader == null || ShaderUtil.ShaderHasError(shader))
@@ -285,9 +315,11 @@ public static class BuildRoadSnowShader
             assetNames = new[]
             {
                 "Assets/RoadSnow/Surface.shader",
+                "Assets/RoadSnow/CachedSurface.shader",
                 "Assets/RoadSnow/TrackStamp.shader",
                 "Assets/RoadSnow/LaneStamp.shader",
                 "Assets/RoadSnow/Banks.shader",
+                "Assets/RoadSnow/PlowBanks.shader",
                 "Assets/RoadSnow/Facility.shader",
                 "Assets/RoadSnow/TrackAtlasProbe.compute",
                 "Assets/RoadSnow/LaneRaster.compute",

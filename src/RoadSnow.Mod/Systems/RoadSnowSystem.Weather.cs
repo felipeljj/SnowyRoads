@@ -7,9 +7,63 @@ namespace RoadSnow.Mod;
 
 public partial class RoadSnowSystem
 {
+    private bool _nativeSnowPresent = true;
+    private bool _dormant;
+    private readonly SnowActivity _snowActivity = new();
+
+    private bool SuspendDryScene()
+    {
+        bool residual = _plowedSnow.Deposits.Count > 0;
+        if (_snowActivity.Active && !_nativeSnowPresent && !residual)
+        {
+            foreach (float depth in _residualHistory.Values)
+            {
+                if (depth > 0.125f)
+                {
+                    residual = true;
+                    break;
+                }
+            }
+        }
+        // Season names come from the base season prefab, not the localized UI.
+        // Outside winter a snowfall must start the cycle; existing snow then thaws normally.
+        bool active = _snowActivity.Update(
+            string.Equals(
+                _climateSystem.currentSeasonName,
+                "Winter",
+                StringComparison.OrdinalIgnoreCase
+            ),
+            _climateSystem.isSnowing,
+            _snowSnapshot != null,
+            _nativeSnowPresent,
+            residual
+        );
+        bool dry = !_isPreviewActive && !active;
+        if (dry != _dormant)
+        {
+            _dormant = dry;
+            _atlas?.SetVisible(!dry);
+            _facilities?.SetVisible(!dry);
+            _snowBanks?.Invalidate();
+            _vehicleHistory.Clear();
+            _pedestrianHistory.Clear();
+            _plowHistory.Clear();
+            _trainHistory.Clear();
+            if (dry)
+            {
+                _wearHistory.Clear();
+                foreach (var lane in _laneHistory.Values)
+                    lane.Advance(0, 0, 0, false, 0, _snowfall.TotalMm);
+            }
+            if (!dry)
+                _nextRefresh = 0;
+        }
+        return dry;
+    }
+
     private void RequestSnowSnapshot(float now)
     {
-        _nextReadback = now + 0.5f;
+        _nextReadback = now + (_dormant && !_climateSystem.isSnowing ? 3f : 0.5f);
         var texture = _snowSystem.SnowDepth;
         if (_readbackPending || texture == null || !SystemInfo.supportsAsyncGPUReadback)
         {
@@ -53,6 +107,17 @@ public partial class RoadSnowSystem
                 }
 
                 values.CopyTo(_snowSnapshot);
+                _nativeSnowPresent = false;
+                for (int i = 0; i < _snowSnapshot.Length; i += 2)
+                {
+                    // Below 0.125 mm no overlay is visible. Encoded depth is quadratic;
+                    // tiny nonzero texels must not keep an otherwise dry city awake.
+                    if (_snowSnapshot[i] >= 260)
+                    {
+                        _nativeSnowPresent = true;
+                        break;
+                    }
+                }
                 _snowSnapshotWidth = width;
                 _snowSnapshotHeight = height;
                 _snowSnapshotMapping = mapping;

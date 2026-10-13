@@ -15,6 +15,12 @@ internal sealed class SnowAtlas : IDisposable
 
     public SnowAtlas(Material material) => _material = material;
 
+    public void SetVisible(bool visible)
+    {
+        foreach (var page in _pages)
+            page.SetVisible(visible);
+    }
+
     public Slot Allocate(bool detailed, Vector3[] vertices, Vector2[] uv, int[] indices)
     {
         foreach (var page in _pages)
@@ -138,6 +144,8 @@ internal sealed class SnowAtlas : IDisposable
         public int TileHeight => Detailed ? 256 : 16;
         public int TilesAcross => Size / TileWidth;
         public bool HasSpace => _free.Count > 0;
+
+        public void SetVisible(bool visible) => _object.SetActive(visible);
 
         public Page(Material material, bool detailed)
         {

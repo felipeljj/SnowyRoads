@@ -39,3 +39,9 @@ desc.WriteDiagnostics	With a city loaded, writes weather, rendering and performa
 quality.Low	Low
 quality.Balanced	Balanced
 quality.High	High
+
+label.RealisticSnow	Realistic mode
+desc.RealisticSnow	Adds displaced snow rims around impressions and banks between worn lanes. Wheels deform these banks. Detail is limited to the camera surroundings with a fixed geometry budget; disable to reduce GPU work. Experimental: may contain bugs and reduce performance. You can turn realistic mode off at any time in the settings.
+label.RealisticSnowWarning	Experimental realistic mode
+desc.RealisticSnowWarning	Experimental: may contain bugs and reduce performance. You can turn realistic mode off at any time in the settings.
+label.Acknowledge	Understood

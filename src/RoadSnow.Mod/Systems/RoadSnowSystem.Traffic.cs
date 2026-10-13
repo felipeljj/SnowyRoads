@@ -18,38 +18,57 @@ namespace RoadSnow.Mod;
 
 public partial class RoadSnowSystem
 {
+    private Camera _trafficCamera;
+    private int _trafficCameraFrame = -1;
+    private WearView.Snapshot _trafficView;
+    private readonly Dictionary<Entity, bool> _singleTrackPrefabs = new();
+
+    private bool HasInlineWheels(Entity prefab)
+    {
+        if (_singleTrackPrefabs.TryGetValue(prefab, out bool single))
+            return single;
+        float3 minimum = new(float.MaxValue),
+            maximum = new(float.MinValue);
+        int wheels = 0;
+        void ReadWheels(Entity mesh, float3 offset, quaternion rotation)
+        {
+            if (!EntityManager.HasBuffer<ProceduralBone>(mesh))
+                return;
+            foreach (var bone in EntityManager.GetBuffer<ProceduralBone>(mesh, true))
+            {
+                if (
+                    bone.m_Type != BoneType.RollingTire
+                    && bone.m_Type != BoneType.SteeringTire
+                    && bone.m_Type != BoneType.FixedTire
+                )
+                    continue;
+                float3 point = offset + math.rotate(rotation, bone.m_ObjectPosition);
+                minimum = math.min(minimum, point);
+                maximum = math.max(maximum, point);
+                wheels++;
+            }
+        }
+        ReadWheels(prefab, 0, quaternion.identity);
+        if (EntityManager.HasBuffer<SubMesh>(prefab))
+            foreach (var mesh in EntityManager.GetBuffer<SubMesh>(prefab, true))
+                ReadWheels(mesh.m_SubMesh, mesh.m_Position, mesh.m_Rotation);
+        single = wheels >= 2 && maximum.x - minimum.x < .18f && maximum.z - minimum.z > .35f;
+        if (wheels < 2)
+        {
+            // Some custom motorcycle meshes have no animated wheel bones.
+            var prefabs = World.GetExistingSystemManaged<PrefabSystem>();
+            if (prefabs != null && prefabs.TryGetPrefab<PrefabBase>(prefab, out var asset))
+                single =
+                    asset.name.IndexOf("motorcycle", StringComparison.OrdinalIgnoreCase) >= 0
+                    || asset.name.IndexOf("motorbike", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        return _singleTrackPrefabs[prefab] = single;
+    }
+
     // these are individual tire marks and footsteps.long-terms lane wear is handled
     // separately by LaneWearMask. changing one should not reset the other
     private void DiscoverTraffic()
     {
-        using (var plows = _snowplowQuery.ToEntityArray(Allocator.Temp))
-        {
-            foreach (var car in plows)
-            {
-                if (_vehicleHistory.ContainsKey(car) || !IsWorkingSnowplow(car))
-                {
-                    continue;
-                }
-
-                Entity road = FindTrafficOwner(
-                    EntityManager.GetComponentData<CarCurrentLane>(car).m_Lane
-                );
-                if (!HasTrafficSurface(road, false))
-                {
-                    continue;
-                }
-
-                _vehicleHistory.Add(
-                    car,
-                    WheelPosition(
-                        car,
-                        road,
-                        EntityManager.GetComponentData<Game.Objects.Transform>(car)
-                    )
-                );
-            }
-        }
-
         if (_vehicleHistory.Count < 512)
         {
             using var cars = _vehicleQuery.ToEntityArray(Allocator.Temp);
@@ -57,21 +76,22 @@ public partial class RoadSnowSystem
             for (int i = 0; i < count && _vehicleHistory.Count < 512; i++)
             {
                 Entity car = cars[(_scanOffset + i) % cars.Length];
-                if (_vehicleHistory.ContainsKey(car))
-                {
-                    continue;
-                }
-
-                Entity road = FindTrafficOwner(
-                    EntityManager.GetComponentData<CarCurrentLane>(car).m_Lane
-                );
-                if (!HasTrafficSurface(road, false))
+                if (_vehicleHistory.ContainsKey(car) || IsSnowplow(car))
                 {
                     continue;
                 }
 
                 var transform = EntityManager.GetComponentData<Game.Objects.Transform>(car);
                 if (!NearTraffic(transform.m_Position))
+                    continue;
+
+                Entity road = FindTrafficOwner(
+                    EntityManager.GetComponentData<CarCurrentLane>(car).m_Lane
+                );
+                if (
+                    !HasTrafficSurface(road, false)
+                    && !TryTerrainSurface(RenderedPosition(car), out _)
+                )
                 {
                     continue;
                 }
@@ -97,22 +117,26 @@ public partial class RoadSnowSystem
                     continue;
                 }
 
+                var position = EntityManager
+                    .GetComponentData<Game.Objects.Transform>(person)
+                    .m_Position;
+                if (!NearTraffic(position))
+                    continue;
+
                 Entity lane = EntityManager.GetComponentData<HumanCurrentLane>(person).m_Lane;
-                if (!EntityManager.HasComponent<Game.Net.PedestrianLane>(lane))
+                if (
+                    !EntityManager.HasComponent<Game.Net.PedestrianLane>(lane)
+                    && !EntityManager.HasComponent<Game.Net.ConnectionLane>(lane)
+                )
                 {
                     continue;
                 }
 
                 Entity road = FindTrafficOwner(lane);
-                if (!HasTrafficSurface(road, true))
-                {
-                    continue;
-                }
-
-                var position = EntityManager
-                    .GetComponentData<Game.Objects.Transform>(person)
-                    .m_Position;
-                if (!NearTraffic(position))
+                if (
+                    !HasTrafficSurface(road, true)
+                    && !TryTerrainSurface(RenderedPosition(person), out _)
+                )
                 {
                     continue;
                 }
@@ -147,9 +171,12 @@ public partial class RoadSnowSystem
     private WheelSample WheelPosition(Entity car, Entity road, Game.Objects.Transform transform)
     {
         float halfTrack = 0.7f;
+        bool bicycle = EntityManager.HasComponent<Game.Vehicles.Bicycle>(car);
+        bool single = bicycle;
         if (EntityManager.HasComponent<PrefabRef>(car))
         {
             Entity prefab = EntityManager.GetComponentData<PrefabRef>(car).m_Prefab;
+            single |= HasInlineWheels(prefab);
             if (EntityManager.HasComponent<ObjectGeometryData>(prefab))
             {
                 halfTrack = Mathf.Clamp(
@@ -160,13 +187,22 @@ public partial class RoadSnowSystem
             }
         }
 
-        if (EntityManager.HasComponent<Game.Vehicles.Bicycle>(car))
+        if (single)
         {
             halfTrack = 0;
         }
 
         float3 right = math.rotate(transform.m_Rotation, new float3(halfTrack, 0, 0));
-        return new WheelSample(road, transform.m_Position - right, transform.m_Position + right);
+        return new WheelSample(
+            road,
+            transform.m_Position - right,
+            transform.m_Position + right,
+            math.rotate(transform.m_Rotation, new float3(0, 0, 1)),
+            single,
+            bicycle ? .075f
+                : single ? .16f
+                : .28f
+        );
     }
 
     private void StampTraffic()
@@ -187,6 +223,8 @@ public partial class RoadSnowSystem
             }
 
             Entity car = _trafficKeys[_carCursor++];
+            if (IsSnowplow(car))
+                continue;
             if (
                 !EntityManager.Exists(car)
                 || !EntityManager.HasComponent<CarCurrentLane>(car)
@@ -199,13 +237,19 @@ public partial class RoadSnowSystem
 
             var lane = EntityManager.GetComponentData<CarCurrentLane>(car);
             Entity road = FindTrafficOwner(lane.m_Lane);
-            if (!HasTrafficSurface(road, false))
+            if (!HasTrafficSurface(road, false) && !TryTerrainSurface(RenderedPosition(car), out _))
             {
                 _vehicleHistory.Remove(car);
                 continue;
             }
 
             var transform = EntityManager.GetComponentData<Game.Objects.Transform>(car);
+            if (EntityManager.HasComponent<InterpolatedTransform>(car))
+            {
+                var rendered = EntityManager.GetComponentData<InterpolatedTransform>(car);
+                transform.m_Position = rendered.m_Position;
+                transform.m_Rotation = rendered.m_Rotation;
+            }
             if (!NearTraffic(transform.m_Position) && !IsWorkingSnowplow(car))
             {
                 _vehicleHistory.Remove(car);
@@ -218,57 +262,32 @@ public partial class RoadSnowSystem
                 float distance = (sample.Left - old.Left).sqrMagnitude;
                 if (distance > 0.01f && distance < 25 * 25)
                 {
-                    bool bicycle = EntityManager.HasComponent<Game.Vehicles.Bicycle>(car);
                     if (IsWorkingSnowplow(car))
                     {
-                        Vector3 from = (old.Left + old.Right) * 0.5f;
-                        Vector3 to = (sample.Left + sample.Right) * 0.5f;
                         float bladeWidth = Mathf.Clamp(
-                            Vector3.Distance(sample.Left, sample.Right) / 0.7f + 0.4f,
+                            Vector3.Distance(sample.Left, sample.Right) / .7f + .4f,
                             2.4f,
                             4
                         );
-                        _carsStamped += StampWheelImpressions(road, from, to, bladeWidth, true);
-                        if (old.Road != road && HasTrafficSurface(old.Road, false))
-                        {
-                            _carsStamped += StampWheelImpressions(
-                                old.Road,
-                                from,
-                                to,
-                                bladeWidth,
-                                true
-                            );
-                        }
-                    }
-
-                    _carsStamped += StampWheelImpressions(
-                        road,
-                        old.Left,
-                        sample.Left,
-                        bicycle ? 0.075f : 0.38f
-                    );
-                    if (!bicycle)
-                    {
-                        _carsStamped += StampWheelImpressions(road, old.Right, sample.Right);
-                    }
-
-                    if (old.Road != road && HasTrafficSurface(old.Road, false))
-                    {
-                        _carsStamped += StampWheelImpressions(
-                            old.Road,
-                            old.Left,
-                            sample.Left,
-                            bicycle ? 0.075f : 0.38f
+                        StampCurvedPath(
+                            old,
+                            sample,
+                            (old.Left + old.Right) * .5f,
+                            (sample.Left + sample.Right) * .5f,
+                            bladeWidth,
+                            true
                         );
-                        if (!bicycle)
-                        {
-                            _carsStamped += StampWheelImpressions(
-                                old.Road,
-                                old.Right,
-                                sample.Right
-                            );
-                        }
                     }
+                    StampCurvedPath(old, sample, old.Left, sample.Left, sample.TireWidth, false);
+                    if (!sample.SingleTrack)
+                        StampCurvedPath(
+                            old,
+                            sample,
+                            old.Right,
+                            sample.Right,
+                            sample.TireWidth,
+                            false
+                        );
                 }
             }
 
@@ -278,6 +297,7 @@ public partial class RoadSnowSystem
 
     private void StampPedestrians()
     {
+        _terrainHeights = _terrainSystem.GetHeightData();
         _footprintsStamped = 0;
         _trafficKeys.Clear();
         _trafficKeys.AddRange(_pedestrianHistory.Keys);
@@ -294,14 +314,20 @@ public partial class RoadSnowSystem
             }
 
             Entity lane = EntityManager.GetComponentData<HumanCurrentLane>(person).m_Lane;
-            if (!EntityManager.HasComponent<Game.Net.PedestrianLane>(lane))
+            if (
+                !EntityManager.HasComponent<Game.Net.PedestrianLane>(lane)
+                && !EntityManager.HasComponent<Game.Net.ConnectionLane>(lane)
+            )
             {
                 _pedestrianHistory.Remove(person);
                 continue;
             }
 
             Entity road = FindTrafficOwner(lane);
-            if (!HasTrafficSurface(road, true))
+            if (
+                !HasTrafficSurface(road, true)
+                && !TryTerrainSurface(RenderedPosition(person), out _)
+            )
             {
                 _pedestrianHistory.Remove(person);
                 continue;
@@ -344,7 +370,10 @@ public partial class RoadSnowSystem
                         footprint.Z
                     );
                     var direction = new Vector3(footprint.ForwardX, 0, footprint.ForwardZ);
-                    if (ProjectMark(road, world, out var surface))
+                    if (
+                        ProjectMark(road, world, out var surface)
+                        || TryTerrainSurface(world, out surface)
+                    )
                     {
                         _trafficMarks.Add(
                             surface - direction * 0.145f,
@@ -397,7 +426,13 @@ public partial class RoadSnowSystem
             return false;
         }
 
-        Vector3 viewport = camera.WorldToViewportPoint(position);
+        if (_trafficCamera != camera || _trafficCameraFrame != UnityEngine.Time.frameCount)
+        {
+            _trafficView = new WearView.Snapshot(camera);
+            _trafficCamera = camera;
+            _trafficCameraFrame = UnityEngine.Time.frameCount;
+        }
+        Vector3 viewport = _trafficView.Viewport(position);
         if (
             viewport.z <= 0
             || viewport.x < -0.08f
@@ -409,14 +444,8 @@ public partial class RoadSnowSystem
             return false;
         }
 
-        float distance = Vector3.Distance(position, camera.transform.position);
-        float mpp = camera.orthographic
-            ? camera.orthographicSize * 2 / Math.Max(1, camera.pixelHeight)
-            : distance
-                * 2
-                * Mathf.Tan(camera.fieldOfView * Mathf.Deg2Rad * 0.5f)
-                / Math.Max(1, camera.pixelHeight);
-        return distance < 550 && mpp < 0.36f;
+        float distanceSquared = (position - _trafficView.Eye).sqrMagnitude;
+        return distanceSquared < 1600 * 1600 && _trafficView.PixelSize(distanceSquared) < 1.2f;
     }
 
     private bool ProjectMark(Entity owner, Vector3 position, out Vector3 surface)
@@ -454,23 +483,34 @@ public partial class RoadSnowSystem
 
     private bool IsWorkingSnowplow(Entity car)
     {
-        if (
-            !EntityManager.HasComponent<MaintenanceVehicle>(car)
-            || !EntityManager.HasComponent<PrefabRef>(car)
-        )
-        {
+        if (!IsSnowplow(car))
             return false;
-        }
 
         var state = EntityManager.GetComponentData<MaintenanceVehicle>(car).m_State;
         if (
-            (state & MaintenanceVehicleFlags.Working) == 0
+            (
+                (state & MaintenanceVehicleFlags.Working) == 0
+                && (
+                    !EntityManager.HasComponent<Car>(car)
+                    || (EntityManager.GetComponentData<Car>(car).m_Flags & CarFlags.Working) == 0
+                )
+            )
             || (state & MaintenanceVehicleFlags.Disabled) != 0
         )
         {
             return false;
         }
 
+        return true;
+    }
+
+    private bool IsSnowplow(Entity car)
+    {
+        if (
+            !EntityManager.HasComponent<MaintenanceVehicle>(car)
+            || !EntityManager.HasComponent<PrefabRef>(car)
+        )
+            return false;
         var prefab = EntityManager.GetComponentData<PrefabRef>(car).m_Prefab;
         return EntityManager.HasComponent<MaintenanceVehicleData>(prefab)
             && (
@@ -479,56 +519,71 @@ public partial class RoadSnowSystem
             ) != 0;
     }
 
-    private int StampWheelImpressions(
-        Entity owner,
+    private void StampCurvedPath(
+        WheelSample old,
+        WheelSample sample,
         Vector3 from,
         Vector3 to,
-        float width = 0.38f,
-        bool plow = false
+        float width,
+        bool plow
     )
     {
         float distance = Vector3.Distance(from, to);
-        int steps = Math.Min(32, Math.Max(1, Mathf.CeilToInt(distance / 1.5f)));
-        int added = 0;
-        for (int step = 0; step < steps; step++)
+        if (distance < .01f || distance > 25)
+            return;
+        // Parking can rotate/reposition a vehicle between samples; do not join that teleport.
+        if (distance > 2 && Vector3.Dot(old.Forward, sample.Forward) < -.5f)
+            return;
+        Vector3 chord = (to - from) / distance;
+        Vector3 start = old.Forward;
+        Vector3 end = sample.Forward;
+        if (Vector3.Dot(start, chord) < 0)
+            start = -start;
+        if (Vector3.Dot(end, chord) < 0)
+            end = -end;
+        // Hermite-equivalent Bezier: vehicle headings supply the tangents, not a guessed lane.
+        Vector3 c1 = from + start * (distance / 3);
+        Vector3 c2 = to - end * (distance / 3);
+        int steps = Math.Min(96, Math.Max(1, Mathf.CeilToInt(distance / .45f)));
+        Vector3 a = from;
+        for (int i = 1; i <= steps; i++)
         {
-            Vector3 a = Vector3.Lerp(from, to, step / (float)steps);
-            Vector3 b = Vector3.Lerp(from, to, (step + 1f) / steps);
-            if (!ProjectMark(owner, (a + b) * 0.5f, out var middle))
+            float t = i / (float)steps,
+                u = 1 - t;
+            Vector3 b = u * u * u * from + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * to;
+            Vector3 middle = (a + b) * .5f;
+            Entity owner = sample.Road;
+            if (!ProjectMark(owner, middle, out var surface))
             {
-                continue;
+                owner = old.Road;
+                if (
+                    !ProjectMark(owner, middle, out surface)
+                    && (plow || !TryTerrainSurface(middle, out surface))
+                )
+                {
+                    a = b;
+                    continue;
+                }
             }
-
-            if (ProjectMark(owner, a, out var projectedA))
-            {
-                a = projectedA;
-            }
-            else
-            {
-                a.y = middle.y;
-            }
-
-            if (ProjectMark(owner, b, out var projectedB))
-            {
-                b = projectedB;
-            }
-            else
-            {
-                b.y = middle.y;
-            }
-
+            Vector3 pa = ProjectMark(owner, a, out var projectedA)
+                ? projectedA
+                : new Vector3(a.x, surface.y, a.z);
+            Vector3 pb = ProjectMark(owner, b, out var projectedB)
+                ? projectedB
+                : new Vector3(b.x, surface.y, b.z);
+            if (plow)
+                DepositPlowedSnow(owner, pa, pb, width);
             _trafficMarks.Add(
-                a,
-                b,
+                pa,
+                pb,
                 false,
-                _isPreviewActive ? 15 : SampleSnow(middle),
+                _isPreviewActive ? 15 : SampleSnow(surface),
                 widthMeters: width,
                 plow: plow
             );
-            added++;
+            _carsStamped++;
+            a = b;
         }
-
-        return added;
     }
 
     private readonly struct WheelSample
@@ -536,12 +591,25 @@ public partial class RoadSnowSystem
         public readonly Entity Road;
         public readonly Vector3 Left;
         public readonly Vector3 Right;
+        public readonly Vector3 Forward;
+        public readonly bool SingleTrack;
+        public readonly float TireWidth;
 
-        public WheelSample(Entity road, Vector3 left, Vector3 right)
+        public WheelSample(
+            Entity road,
+            Vector3 left,
+            Vector3 right,
+            Vector3 forward,
+            bool singleTrack = false,
+            float tireWidth = .28f
+        )
         {
             Road = road;
             Left = left;
             Right = right;
+            Forward = forward;
+            SingleTrack = singleTrack;
+            TireWidth = tireWidth;
         }
     }
 

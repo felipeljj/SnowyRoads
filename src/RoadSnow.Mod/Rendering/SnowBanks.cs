@@ -14,15 +14,16 @@ internal sealed class SnowBanks : IDisposable
     private readonly Material _material;
     private readonly List<Batch>[] _pools = { new(), new() };
     private readonly Dictionary<(RoadPatch, int), SnowBankMesh> _cache = new();
+    private readonly Dictionary<RoadPatch, int> _lods = new();
     private readonly List<(RoadPatch Patch, float Distance)> _near = new();
     private readonly List<Group> _groups = new();
-    private readonly Plane[] _planes = new Plane[6];
     private int _front;
     private int _scan;
     private int _build;
     private int _upload;
     private int _stage;
     private int _quality;
+    private bool _realistic;
     private int _triangles;
     private float _next;
     private Vector3 _eye;
@@ -53,14 +54,47 @@ internal sealed class SnowBanks : IDisposable
         }
 
         _cache.Clear();
+        _lods.Clear();
         _stage = 0;
         _next = 0;
         Triangles = Batches = 0;
     }
 
-    public void Update(Camera camera, List<RoadPatch> patches, float now, bool enabled, int quality)
+    public void Retire(RoadPatch patch)
+    {
+        // A road changing elsewhere must not blank every visible snow bank.
+        for (int lod = 0; lod < 3; lod++)
+            _cache.Remove((patch, lod));
+        _lods.Remove(patch);
+        _next = 0;
+    }
+
+    public void Update(
+        Camera camera,
+        List<RoadPatch> patches,
+        float now,
+        bool enabled,
+        int quality,
+        Vector3? pivot = null,
+        bool realistic = false
+    )
     {
         long start = Stopwatch.GetTimestamp();
+        quality = Mathf.Clamp(quality, 1, 3);
+        float range =
+            quality == 1 ? 240
+            : quality == 2 ? 360
+            : 480;
+        Vector3 eye = camera.transform.position;
+        var focus = pivot ?? eye;
+        var offset = Vector2.ClampMagnitude(
+            new Vector2(focus.x - eye.x, focus.z - eye.z),
+            range * .35f
+        );
+        eye.x += offset.x;
+        eye.z += offset.y;
+        // Impression shading also uses this position when raised banks are off.
+        Shader.SetGlobalVector("_RoadSnowBankCamera", new Vector4(eye.x, eye.y, eye.z, range));
         if (!enabled)
         {
             if (Batches > 0 || _stage != 0)
@@ -71,17 +105,11 @@ internal sealed class SnowBanks : IDisposable
             return;
         }
 
-        quality = Mathf.Clamp(quality, 1, 3);
-        float range =
-            quality == 1 ? 65
-            : quality == 2 ? 90
-            : 115;
-        Vector3 eye = camera.transform.position;
-        Shader.SetGlobalVector("_RoadSnowBankCamera", new Vector4(eye.x, eye.y, eye.z, range));
-        if (_quality != quality)
+        if (_quality != quality || _realistic != realistic)
         {
             Invalidate();
             _quality = quality;
+            _realistic = realistic;
         }
 
         if (_stage == 0)
@@ -92,7 +120,6 @@ internal sealed class SnowBanks : IDisposable
             }
 
             _eye = eye;
-            GeometryUtility.CalculateFrustumPlanes(camera, _planes);
             _scan = _build = _upload = _triangles = 0;
             _near.Clear();
             _groups.Clear();
@@ -102,13 +129,16 @@ internal sealed class SnowBanks : IDisposable
         while (_stage == 1 && _scan < patches.Count && Elapsed(start) < .65)
         {
             var patch = patches[_scan++];
-            if (!patch.Active || patch.BankBands.Length == 0)
+            if (!patch.Active || patch.BankBands.Length == 0 && !(realistic && patch.HasRoadBanks))
             {
                 continue;
             }
 
-            float distance = patch.Bounds.SqrDistance(_eye);
-            if (distance > range * range || !GeometryUtility.TestPlanesAABB(_planes, patch.Bounds))
+            // Select around the ground pivot. Camera height/rotation must not erase
+            // the same curb while the player inspects it. Renderer bounds handle culling.
+            var ground = new Vector3(_eye.x, patch.Bounds.center.y, _eye.z);
+            float distance = patch.Bounds.SqrDistance(ground);
+            if (distance > range * range)
             {
                 continue;
             }
@@ -141,6 +171,15 @@ internal sealed class SnowBanks : IDisposable
                 item.Distance < 25 * 25 ? 0
                 : item.Distance < 50 * 50 ? 1
                 : 2;
+            if (_lods.TryGetValue(patch, out int previous))
+            {
+                if (previous == 0 && item.Distance < 30 * 30)
+                    lod = 0;
+                if (previous == 1 && item.Distance > 20 * 20 && item.Distance < 60 * 60)
+                    lod = 1;
+                if (previous == 2 && item.Distance > 40 * 40)
+                    lod = 2;
+            }
             var key = (patch, lod);
             if (!_cache.TryGetValue(key, out var mesh))
             {
@@ -149,26 +188,29 @@ internal sealed class SnowBanks : IDisposable
                     _cache.Clear();
                 }
 
-                _cache.Add(key, mesh = patch.BuildBankMesh(lod));
+                _cache.Add(key, mesh = patch.BuildBankMesh(lod, realistic));
             }
 
-            if (_triangles + mesh.TriangleCount > 6000 * quality)
+            int budget = (realistic ? 24000 : 12000) * quality;
+            // A wide, close road should become less detailed before its banks
+            // disappear altogether when the shared triangle budget is full.
+            while (lod < 2 && _triangles + mesh.TriangleCount > budget)
+            {
+                key = (patch, ++lod);
+                if (!_cache.TryGetValue(key, out mesh))
+                    _cache[key] = mesh = patch.BuildBankMesh(lod, realistic);
+            }
+            _lods[patch] = lod;
+            if (_triangles + mesh.TriangleCount > budget)
             {
                 continue;
             }
 
-            var texture = patch.BankTexture;
-            Group group = _groups.Find(g => g.Texture == texture);
-            if (group == null)
-            {
-                if (_groups.Count >= 4 * quality)
-                {
-                    continue;
-                }
-
-                _groups.Add(group = new Group(texture));
-            }
-
+            // Per-vertex retention removes atlas ownership from this renderer.
+            // A texture-group cap used to drop valid banks when the camera moved.
+            if (_groups.Count == 0)
+                _groups.Add(new Group());
+            var group = _groups[0];
             group.Append(patch, mesh);
             _triangles += mesh.TriangleCount;
         }
@@ -233,22 +275,24 @@ internal sealed class SnowBanks : IDisposable
 
     private sealed class Group
     {
-        public readonly Texture2D Texture;
+        public readonly List<Vector2> Metadata = new();
         public readonly List<Vector3> Vertices = new();
         public readonly List<Vector2> UV = new();
         public readonly List<Vector2> BaseRise = new();
         public readonly List<int> Indices = new();
-
-        public Group(Texture2D texture) => Texture = texture;
 
         public void Append(RoadPatch patch, SnowBankMesh mesh)
         {
             int offset = Vertices.Count;
             Vertices.AddRange(mesh.Vertices);
             BaseRise.AddRange(mesh.BaseAndRise);
-            foreach (var uv in mesh.UV)
+            for (int i = 0; i < mesh.UV.Count; i++)
             {
-                UV.Add(patch.BankUV(uv));
+                var uv = mesh.UV[i];
+                UV.Add(uv);
+                var metadata = patch.BankMetadata(uv);
+                metadata.w = mesh.Interior[i] ? -1 : 1;
+                Metadata.Add(new Vector2(metadata.x * metadata.y, metadata.w));
             }
 
             foreach (int index in mesh.Triangles)
@@ -289,10 +333,11 @@ internal sealed class SnowBanks : IDisposable
             _mesh.SetVertices(group.Vertices);
             _mesh.SetUVs(0, group.UV);
             _mesh.SetUVs(2, group.BaseRise);
+            _mesh.SetUVs(3, group.Metadata);
             _mesh.SetTriangles(group.Indices, 0);
             _mesh.RecalculateNormals();
             _mesh.RecalculateBounds();
-            _properties.SetTexture("_BaseColorMap", group.Texture);
+            _properties.SetTexture("_BaseColorMap", Texture2D.whiteTexture);
             _renderer.SetPropertyBlock(_properties);
         }
 

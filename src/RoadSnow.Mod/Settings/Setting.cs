@@ -1,7 +1,10 @@
 using Colossal.IO.AssetDatabase;
 using Colossal.Json;
 using Game.Modding;
+using Game.SceneFlow;
 using Game.Settings;
+using Game.UI;
+using Game.UI.Localization;
 using Game.UI.Menu;
 using UnityEngine;
 
@@ -75,6 +78,26 @@ public sealed class Setting : ModSetting
     [SettingsUISection("Appearance", "Relief")]
     public bool RaisedSnow { get; set; } = true;
 
+    [SettingsUISection("Appearance", "Relief")]
+    [SettingsUISetter(typeof(Setting), nameof(OnRealisticSnowChanged))]
+    public bool RealisticSnow { get; set; } = true;
+
+    public void OnRealisticSnowChanged(bool enabled)
+    {
+        // The settings widget invokes this before assigning the property. Loading
+        // a saved configuration does not invoke UI setters or open a dialog.
+        if (!enabled || RealisticSnow)
+            return;
+        GameManager.instance.userInterface.appBindings.ShowMessageDialog(
+            new MessageDialog(
+                LocalizedString.Id(GetOptionLabelLocaleID("RealisticSnowWarning")),
+                LocalizedString.Id(GetOptionDescLocaleID("RealisticSnowWarning")),
+                LocalizedString.Id(GetOptionLabelLocaleID("Acknowledge"))
+            ),
+            _ => { }
+        );
+    }
+
     [SettingsUIHidden]
     public int BankDetail { get; set; } = 2;
 
@@ -128,6 +151,7 @@ public sealed class Setting : ModSetting
         SurfaceOffsetCm = 2;
         PreviewSnow = ShowSnowDepth = false;
         VisibleRelief = RaisedSnow = true;
+        RealisticSnow = true;
         ResidualMeltHours = 2;
         BankDetail = 2;
     }

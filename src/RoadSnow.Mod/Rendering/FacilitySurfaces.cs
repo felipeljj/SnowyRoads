@@ -51,6 +51,8 @@ internal sealed class FacilitySurfaces : IDisposable
     public int Triangles => _indices.Count / 3;
     public double UpdateMs { get; private set; }
 
+    public void SetVisible(bool visible) => _renderer.enabled = visible;
+
     public FacilitySurfaces(EntityManager manager, Material source, Shader shader)
     {
         _manager = manager;

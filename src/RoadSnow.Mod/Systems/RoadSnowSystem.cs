@@ -20,7 +20,7 @@ using MaintenanceVehicle = Game.Vehicles.MaintenanceVehicle;
 
 namespace RoadSnow.Mod;
 
-public partial class RoadSnowSystem : GameSystemBase
+public partial class RoadSnowSystem : GameSystemBase, IDefaultSerializable
 {
     // this file owns the lifecycle and update order. traffic, surfaces, weather and rendering
     // live in the other partial files, but still share this system's state
@@ -33,11 +33,13 @@ public partial class RoadSnowSystem : GameSystemBase
     private EntityQuery _vehicleQuery;
     private EntityQuery _pedestrianQuery;
     private EntityQuery _snowplowQuery;
+    private EntityQuery _trainQuery;
     private Material _material;
     private AssetBundle _shaderBundle;
     private Shader _surfaceShader;
     private SnowAtlas _atlas;
     private TrafficMarks _trafficMarks;
+    private TrafficMarks _distantMarks;
     private LaneWearMask _laneWearMask;
     private SnowBanks _snowBanks;
     private FacilitySurfaces _facilities;
@@ -166,14 +168,31 @@ public partial class RoadSnowSystem : GameSystemBase
                 None = new[] { ComponentType.ReadOnly<Deleted>(), ComponentType.ReadOnly<Temp>() },
             }
         );
+        _trainQuery = GetEntityQuery(
+            new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<TrainCurrentLane>(),
+                    ComponentType.ReadOnly<Game.Objects.Transform>(),
+                },
+                None = new[] { ComponentType.ReadOnly<Deleted>(), ComponentType.ReadOnly<Temp>() },
+            }
+        );
     }
 
     protected override void OnGamePreload(Purpose purpose, GameMode mode)
     {
         _isCityLoaded = false;
         ReleaseOverlays();
+        _plowedSnow.Deposits.Clear();
         _wearHistory.Clear();
+        _laneHistory.Clear();
+        _laneLayout.Clear();
+        _residualHistory.Clear();
+        _cachedCoverage.Clear();
         _snowfall.Reset();
+        _snowActivity.Restore(false);
     }
 
     protected override void OnGameLoadingComplete(Purpose purpose, GameMode mode)
@@ -190,6 +209,21 @@ public partial class RoadSnowSystem : GameSystemBase
     protected override void OnUpdate()
     {
         if (!_isCityLoaded || Mod.Settings == null)
+            return;
+        long started = Stopwatch.GetTimestamp();
+        try
+        {
+            UpdateSnow();
+        }
+        finally
+        {
+            RecordPerformance(Milliseconds(started));
+        }
+    }
+
+    private void UpdateSnow()
+    {
+        if (!_isCityLoaded || Mod.Settings == null)
         {
             return;
         }
@@ -200,6 +234,11 @@ public partial class RoadSnowSystem : GameSystemBase
         _weatherFrame = _simulationSystem.frameIndex;
         if (weatherElapsed <= TimeSystem.kTicksPerDay)
         {
+            _plowedSnow.Melt(
+                weatherElapsed * (24f / TimeSystem.kTicksPerDay),
+                _climateSystem.temperature,
+                Mod.Settings.ResidualMeltHours
+            );
             _snowfall.Advance(
                 weatherElapsed * (24f / TimeSystem.kTicksPerDay),
                 _climateSystem.isSnowing && !Mod.Settings.PreviewSnow,
@@ -227,7 +266,7 @@ public partial class RoadSnowSystem : GameSystemBase
                     _carsStamped,
                     _footprintsStamped,
                     _snowSnapshot != null,
-                    $"banks + native facility floors + organic lanes; visible wear tiles={_trafficMarks?.Drawn}; stored wear tiles={_trafficMarks?.Stored}; nativeAlbedo={_nativeAlbedo?.name}; nativeNormal={_nativeNormal?.name}; laneRibbons={_laneWearMask?.Drawn}; depthView={Mod.Settings.ShowSnowDepth}; residualHours={Mod.Settings.ResidualMeltHours}; atlas batches={_atlas?.BatchCount}; node parts={_nodeParts}; queued={_pending.Count - _pendingHead}; field cells={_activePatches.Sum(p => (long)p.Field.Columns * p.Field.Rows)}; tickMs={_lastTickMs:F2}; snowMs={_snowBudgetMs:F2}; refreshMs={_lastRefreshMs:F2}"
+                    $"banks + native facility floors + organic lanes; visible wear tiles={_trafficMarks?.Drawn}; stored wear tiles={_trafficMarks?.Stored}; nativeAlbedo={_nativeAlbedo?.name}; nativeNormal={_nativeNormal?.name}; laneRibbons={_laneWearMask?.Drawn}; depthView={Mod.Settings.ShowSnowDepth}; residualHours={Mod.Settings.ResidualMeltHours}; atlas batches={_atlas?.BatchCount}; native junctions={_nativeJunctions.Built}; unavailable native templates={_nativeJunctions.Unavailable}; node parts={_nodeParts}; queued={_pending.Count - _pendingHead}; field cells={_activePatches.Sum(p => (long)p.Field.Columns * p.Field.Rows)}; tickMs={_lastTickMs:F2}; snowMs={_snowBudgetMs:F2}; refreshMs={_lastRefreshMs:F2}"
                 );
             }
             catch (Exception error)
@@ -270,6 +309,15 @@ public partial class RoadSnowSystem : GameSystemBase
         }
 
         _isPreviewActive = Mod.Settings.PreviewSnow;
+        if (!_isPreviewActive && now >= _nextReadback)
+        {
+            RequestSnowSnapshot(now);
+        }
+        if (SuspendDryScene())
+        {
+            _lastFrame = _simulationSystem.frameIndex;
+            return;
+        }
         if (!EnsureMaterial())
         {
             return;
@@ -279,11 +327,7 @@ public partial class RoadSnowSystem : GameSystemBase
         Shader.SetGlobalVector("_RoadSnowMapping", _terrainSystem.mapOffsetScale);
         Shader.SetGlobalFloat("_RoadSnowPreview", _isPreviewActive ? 1 : 0);
         UpdateAppearance(now);
-        if (!_isPreviewActive && now >= _nextReadback)
-        {
-            RequestSnowSnapshot(now);
-        }
-
+        _cachedCoverage.Draw(_cameraSystem.activeCamera, _material, _cacheShader);
         Camera camera = _cameraSystem.activeCamera;
         if (camera == null)
         {
@@ -314,17 +358,22 @@ public partial class RoadSnowSystem : GameSystemBase
         _lastRefreshMs = Milliseconds(refreshStarted);
         CreatePending(now);
         _facilities?.Update(camera, now);
+        _terrainMarks?.Draw(camera, _material, now);
         _snowBanks?.Update(
             camera,
             _activePatches,
             now,
             Mod.Settings.RaisedSnow,
-            Mod.Settings.BankDetail
+            Mod.Settings.BankDetail,
+            _cameraSystem.activeCameraController?.pivot,
+            Mod.Settings.RealisticSnow
         );
         _createMs = _lastCreateMs;
+        _plowedSnow.Draw(camera, _material, _plowShader, Mod.Settings.RaisedSnow, now);
         UpdateSnowBudget(now);
         if (_snowSnapshot != null || _isPreviewActive)
         {
+            long laneStarted = Stopwatch.GetTimestamp();
             _laneWearMask.Update(
                 EntityManager,
                 _simulationSystem.frameIndex,
@@ -334,6 +383,7 @@ public partial class RoadSnowSystem : GameSystemBase
                 p => _isPreviewActive ? 15 : SampleSnow(p),
                 _snowfall.TotalMm
             );
+            _laneUpdateMs = Milliseconds(laneStarted);
         }
 
         long atlasStarted = Stopwatch.GetTimestamp();
@@ -349,7 +399,11 @@ public partial class RoadSnowSystem : GameSystemBase
         {
             _footFrame = _simulationSystem.frameIndex;
             _nextFootSample = now + 0.075f;
+            long agentsStarted = Stopwatch.GetTimestamp();
+            StampSnowplows(now);
+            StampTrains();
             StampPedestrians();
+            _agentsMs = Milliseconds(agentsStarted);
         }
 
         if (now < _nextTick)
@@ -374,7 +428,9 @@ public partial class RoadSnowSystem : GameSystemBase
         {
             if (now >= _nextTrafficScan)
             {
+                long discoveryStarted = Stopwatch.GetTimestamp();
                 DiscoverTraffic();
+                _discoveryMs = Milliseconds(discoveryStarted);
                 _nextTrafficScan = now + 1;
             }
 
@@ -392,6 +448,15 @@ public partial class RoadSnowSystem : GameSystemBase
         );
         if (_snowSnapshot != null || _isPreviewActive)
         {
+            _distantMarks.Draw(
+                camera,
+                32768,
+                CurrentSnowColor,
+                _isPreviewActive ? _ => 15 : SampleSnow,
+                _snowSnapshotVersion,
+                _climateSystem.isSnowing && !_isPreviewActive,
+                _snowfall.TotalMm
+            );
             _trafficMarks.Draw(
                 camera,
                 Mathf.Clamp(Mod.Settings.MaximumPatches, 16, 128) * 32,
@@ -411,7 +476,7 @@ public partial class RoadSnowSystem : GameSystemBase
             _trafficMarks.ProbeGpu(message => Mod.log.Info("RoadSnow " + message));
             _laneWearMask.ProbeGpu(message => Mod.log.Info("RoadSnow " + message));
             Mod.log.Info(
-                $"RoadSnow performance: patches={_patches.Count}, batches={_atlas.BatchCount}, nodes={_nodeParts}, pending={_pending.Count - _pendingHead}, detailed={_detailedParts}, tileWrites={_uploadedParts}, tickMs={_lastTickMs:F2}, stampMs={_stampMs:F2}, marksMs={_marksMs:F2}, snowMs={_snowBudgetMs:F2}, createMs={_createMs:F2}, meshMs={_atlasMs:F2}, refreshMs={_lastRefreshMs:F2}, tires={_carsStamped}, feet={_footprintsStamped}, native={_snowSnapshot != null}, visibleWearTiles={_trafficMarks.Drawn}, storedWearTiles={_trafficMarks.Stored}, liveWearTiles={_trafficMarks.LiveTiles}, viewCandidates={_trafficMarks.ViewCandidates}, trackedPeople={_pedestrianHistory.Count}, trackedCars={_vehicleHistory.Count}, lanes={_laneWearMask.Registered}, laneRibbons={_laneWearMask.Drawn}, lanePeakPressure={_laneWearMask.PeakPressure:F3}, bankTriangles={_snowBanks?.Triangles}, bankBatches={_snowBanks?.Batches}, bankMs={_snowBanks?.UpdateMs:F2}, facilitySurfaces={_facilities?.Count}, facilityTriangles={_facilities?.Triangles}, facilityMs={_facilities?.UpdateMs:F2}"
+                $"RoadSnow performance: patches={_patches.Count}, batches={_atlas.BatchCount}, nodes={_nodeParts}, pending={_pending.Count - _pendingHead}, detailed={_detailedParts}, tileWrites={_uploadedParts}, tickMs={_lastTickMs:F2}, stampMs={_stampMs:F2}, agentsMs={_agentsMs:F2}, discoveryMs={_discoveryMs:F2}, laneUpdateMs={_laneUpdateMs:F2}, marksMs={_marksMs:F2}, fineMarksMs={_trafficMarks.LastDrawMs:F2}, farMarksMs={_distantMarks.LastDrawMs:F2}, snowMs={_snowBudgetMs:F2}, createMs={_createMs:F2}, meshMs={_atlasMs:F2}, refreshMs={_lastRefreshMs:F2}, tires={_carsStamped}, feet={_footprintsStamped}, native={_snowSnapshot != null}, visibleWearTiles={_trafficMarks.Drawn}, storedWearTiles={_trafficMarks.Stored}, liveWearTiles={_trafficMarks.LiveTiles}, viewCandidates={_trafficMarks.ViewCandidates}, trackedPeople={_pedestrianHistory.Count}, trackedCars={_vehicleHistory.Count}, lanes={_laneWearMask.Registered}, laneRibbons={_laneWearMask.Drawn}, lanePeakPressure={_laneWearMask.PeakPressure:F3}, bankTriangles={_snowBanks?.Triangles}, bankBatches={_snowBanks?.Batches}, bankMs={_snowBanks?.UpdateMs:F2}, facilitySurfaces={_facilities?.Count}, facilityTriangles={_facilities?.Triangles}, facilityMs={_facilities?.UpdateMs:F2}"
             );
             _uploadedParts = 0;
             _nextMetrics = now + 20;
@@ -419,6 +484,9 @@ public partial class RoadSnowSystem : GameSystemBase
     }
 
     private double _lastCreateMs;
+    private double _laneUpdateMs;
+    private double _agentsMs;
+    private double _discoveryMs;
 
     private static double Milliseconds(long started) =>
         (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;

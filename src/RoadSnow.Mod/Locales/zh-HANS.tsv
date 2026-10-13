@@ -39,3 +39,9 @@ desc.WriteDiagnostics	加载城市后，将天气、渲染和性能信息保存�
 quality.Low	低
 quality.Balanced	均衡
 quality.High	高
+
+label.RealisticSnow	真实模式
+desc.RealisticSnow	在脚印和轮胎痕迹周围添加被挤出的雪，并在磨损车道之间形成积雪。车轮会改变积雪形状。细节仅显示在镜头附近，且受固定几何预算限制；关闭可降低显卡负担。 实验性功能：可能出现错误并降低性能。您可以随时在设置中关闭真实模式。
+label.RealisticSnowWarning	实验性真实模式
+desc.RealisticSnowWarning	实验性功能：可能出现错误并降低性能。您可以随时在设置中关闭真实模式。
+label.Acknowledge	知道了

@@ -39,3 +39,9 @@ desc.WriteDiagnostics	Schreibt bei geladener Stadt Wetter-, Darstellungs- und Le
 quality.Low	Niedrig
 quality.Balanced	Ausgewogen
 quality.High	Hoch
+
+label.RealisticSnow	Realistischer Modus
+desc.RealisticSnow	Ergänzt verdrängte Schneeränder an Spuren und Schnee zwischen abgefahrenen Fahrstreifen. Räder verformen diese Schneebänke. Kameranaher Detailbereich mit festem Geometriebudget; Abschalten reduziert die Grafiklast. Experimentell: Kann Fehler enthalten und die Leistung beeinträchtigen. Der realistische Modus kann jederzeit in den Einstellungen deaktiviert werden.
+label.RealisticSnowWarning	Experimenteller realistischer Modus
+desc.RealisticSnowWarning	Experimentell: Kann Fehler enthalten und die Leistung beeinträchtigen. Der realistische Modus kann jederzeit in den Einstellungen deaktiviert werden.
+label.Acknowledge	Verstanden

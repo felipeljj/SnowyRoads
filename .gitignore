@@ -11,3 +11,12 @@ GameAssemblies/
 **/Logs/
 **/Temp/
 **/.vs/
+
+# Generated shader-build reports and previews (the runtime bundle is required).
+/assets/*.manifest
+/assets/assets
+/assets/lane-mask-preview.png
+
+# Machine-local publishing configuration; commit the example and profile only.
+/src/RoadSnow.Mod/Properties/PublishConfiguration.xml
+/src/RoadSnow.Mod/Properties/Thumbnail.png

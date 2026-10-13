@@ -10,6 +10,24 @@ public sealed class LaneSnow
     private bool _initialized;
     private double _lastSnowfallTotal = -1;
 
+    public void Write(System.IO.BinaryWriter writer)
+    {
+        writer.Write(Pressure);
+        writer.Write(_lastNativeDepth);
+        writer.Write(_lastSnowfallTotal);
+    }
+
+    public void Read(System.IO.BinaryReader reader)
+    {
+        Pressure = Math.Max(0, Math.Min(1, reader.ReadSingle()));
+        _lastNativeDepth = reader.ReadSingle();
+        _lastSnowfallTotal = reader.ReadDouble();
+        if(float.IsNaN(Pressure) || float.IsInfinity(Pressure) || float.IsNaN(_lastNativeDepth)
+            || float.IsInfinity(_lastNativeDepth) || double.IsNaN(_lastSnowfallTotal)
+            || double.IsInfinity(_lastSnowfallTotal)) throw new System.IO.InvalidDataException("Invalid saved lane snow.");
+        _initialized = true;
+    }
+
     public void Advance(
         float nativeDepth,
         float volume,

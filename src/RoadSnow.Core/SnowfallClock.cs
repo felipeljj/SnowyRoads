@@ -9,6 +9,8 @@ public sealed class SnowfallClock
 
     public void Reset() => TotalMm = 0;
 
+    public void Restore(double total) => TotalMm = double.IsNaN(total) || double.IsInfinity(total) ? 0 : Math.Max(0, total);
+
     public void Advance(float gameHours, bool snowing, float precipitation)
     {
         if (

@@ -155,6 +155,15 @@ public sealed class WearHistory
         Revision++;
     }
 
+    public float Sample(float x, float y, float z)
+    {
+        int tx = (int)Math.Floor(x / TileMeters), tz = (int)Math.Floor(z / TileMeters);
+        if (!_lookup.TryGetValue((tx, tz, (int)Math.Floor(y / 4)), out var tile) || tile.Empty) return 0;
+        int cx = Math.Min(Size-1, Math.Max(0, (int)Math.Floor((x-tx*TileMeters)/Cell)));
+        int cz = Math.Min(Size-1, Math.Max(0, (int)Math.Floor((z-tz*TileMeters)/Cell)));
+        return tile.Pixels[(cz*Size+cx)*4]/255f;
+    }
+
     public void CompressBackground(ISet<WearTile> visible)
     {
         int checkedTiles = 0;
@@ -175,5 +184,31 @@ public sealed class WearHistory
             tile.Compress();
             compressed++;
         }
+    }
+
+    // A bounded recent history keeps saves manageable; lane wear is saved separately.
+    public void Write(System.IO.BinaryWriter writer)
+    {
+        var live = new List<WearTile>();
+        for (int i = Tiles.Count - 1; i >= 0 && live.Count < 2048; i--)
+            if (!Tiles[i].Empty) live.Add(Tiles[i]);
+        writer.Write(live.Count);
+        for (int i = live.Count - 1; i >= 0; i--) live[i].Write(writer);
+    }
+
+    public void Read(System.IO.BinaryReader reader)
+    {
+        Clear();
+        int count = reader.ReadInt32();
+        if (count < 0 || count > 2048) throw new System.IO.InvalidDataException("Invalid snow history size.");
+        for (int i = 0; i < count; i++)
+        {
+            var tile = WearTile.Read(reader);
+            var key = (tile.X, tile.Z, tile.Layer);
+            if (_lookup.ContainsKey(key)) throw new System.IO.InvalidDataException("Duplicate snow tile.");
+            _lookup.Add(key, tile);
+            Tiles.Add(tile);
+        }
+        Revision++;
     }
 }

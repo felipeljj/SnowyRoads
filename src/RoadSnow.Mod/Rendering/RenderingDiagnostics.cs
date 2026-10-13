@@ -34,6 +34,9 @@ internal static class RenderingDiagnostics
             $"Preview={preview}; visible networks={visibleNetworks}; detailed parts={detailedParts}; tire stamps last tick={tireStamps}; footprint stamps last tick={footsteps}; native snapshot={nativeSnapshot}"
         );
         text.AppendLine(runtime);
+        var ambient = new Color[1];
+        RenderSettings.ambientProbe.Evaluate(new[] { Vector3.up }, ambient);
+        text.AppendLine("Game ambient light above snow=" + ambient[0]);
         text.AppendLine(
             $"Native snow texture={snow.SnowDepth?.name}; size={snow.SnowDepth?.width}x{snow.SnowDepth?.height}"
         );

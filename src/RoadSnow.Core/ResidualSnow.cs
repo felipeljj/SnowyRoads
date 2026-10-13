@@ -6,6 +6,8 @@ public sealed class ResidualSnow
 {
     public float DepthMm { get; private set; }
 
+    public void Restore(float depth) => DepthMm = float.IsNaN(depth) ? 0 : Math.Max(0, Math.Min(30, depth));
+
     public void Advance(
         float observed,
         float hours,

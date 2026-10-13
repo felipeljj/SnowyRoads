@@ -2,8 +2,65 @@
 #pragma kernel Raster
 struct Quad { float4 a,b,c,d,shape; };
 StructuredBuffer<Quad> _Quads;
-RWTexture2D<uint> _Output;
+RWTexture2DArray<uint> _Output;
 float4 _Area;
+
+// Traffic compacts the lane centre, but only the wheel corridors approach bare
+// asphalt. Keep this independent of snow depth so a busy lane retains its ruts.
+float LaneCompaction(float pressure) { return lerp(.30,.58,smoothstep(.15,.85,pressure)); }
+
+// Clip the lane footprint against the pixel square. Adjacent curve segments
+// contribute disjoint areas, so their coverage can be added without end blobs.
+float QuadCoverage(float2 p, Quad q, float pixel, float lo, float hi) {
+    float2 points[12];
+    points[0]=(lerp(q.a.xz,q.b.xz,lo)-p)/pixel;
+    points[1]=(lerp(q.a.xz,q.b.xz,hi)-p)/pixel;
+    points[2]=(lerp(q.c.xz,q.d.xz,hi)-p)/pixel;
+    points[3]=(lerp(q.c.xz,q.d.xz,lo)-p)/pixel;
+    int count=4;
+    [unroll] for(int plane=0;plane<4;plane++) {
+        if(count<3) return 0;
+        float2 clipped[12]; int next=0;
+        float2 axis=plane==0?float2(1,0):plane==1?float2(-1,0):plane==2?float2(0,1):float2(0,-1);
+        float2 previous=points[count-1]; float pd=dot(previous,axis)-.5;
+        [loop] for(int i=0;i<count;i++) {
+            float2 current=points[i]; float cd=dot(current,axis)-.5;
+            if((pd<=0)!=(cd<=0)) clipped[next++]=lerp(previous,current,pd/(pd-cd));
+            if(cd<=0) clipped[next++]=current;
+            previous=current; pd=cd;
+        }
+        count=next;
+        [loop] for(int j=0;j<count;j++) points[j]=clipped[j];
+    }
+    float area=0;
+    [loop] for(int i=0;i<count;i++) {
+        float2 a=points[i],b=points[(i+1)%count];
+        area+=a.x*b.y-a.y*b.x;
+    }
+    return saturate(abs(area)*.5);
+}
+bool CoarseLane(float2 p,Quad q,float pixel,out float height,out float wear) {
+    float3 start=(q.a.xyz+q.b.xyz)*.5, end=(q.c.xyz+q.d.xyz)*.5;
+    float2 delta=end.xz-start.xz;
+    float along=saturate(dot(p-start.xz,delta)/max(.000001,dot(delta,delta)));
+    height=lerp(start.y,end.y,along);
+    float pressure=saturate(lerp(q.a.w,q.c.w,along));
+    // Subpixel ruts contribute their integrated area, rather than turning the
+    // whole distant lane into asphalt. 2 * sqrt(pi) * mean Gaussian radius.
+    float rutCoverage=saturate(1.01030/max(.001,q.shape.x*.765));
+    float average=lerp(LaneCompaction(pressure),1,rutCoverage)
+        *lerp(.74,1,smoothstep(.75,1,pressure));
+    wear=.95*pressure*average*QuadCoverage(p,q,pixel,.1175,.8825);
+    if(q.shape.y>.5) {
+        float rail=0;
+        [unroll] for(int side=-1;side<=1;side+=2) {
+            float u=.5+side*.7175/q.shape.x;
+            rail+=QuadCoverage(p,q,pixel,u-.035/q.shape.x,u+.035/q.shape.x);
+        }
+        wear=max(wear,.95*rail);
+    }
+    return wear>0;
+}
 
 float LaneHash(float2 p) { p=frac(p*float2(.1031,.11369)); p+=dot(p,p.yx+19.19); return frac((p.x+p.y)*p.x); }
 float LaneNoise(float2 p) {
@@ -11,7 +68,7 @@ float LaneNoise(float2 p) {
     return lerp(lerp(LaneHash(i),LaneHash(i+float2(1,0)),f.x),lerp(LaneHash(i+float2(0,1)),LaneHash(i+1),f.x),f.y);
 }
 [numthreads(8,8,1)]
-void Clear(uint3 id:SV_DispatchThreadID) { _Output[id.xy]=0; }
+void Clear(uint3 id:SV_DispatchThreadID) { _Output[id]=0; }
 
 bool Triangle(float2 p,float4 a,float4 b,float4 c,float3 sides,out float height,out float pressure,out float side) {
     float2 ab=b.xz-a.xz, ac=c.xz-a.xz, ap=p-a.xz;
@@ -31,19 +88,27 @@ void Raster(uint3 group:SV_GroupID,uint3 thread:SV_GroupThreadID) {
     Quad q=_Quads[group.x];
     float2 lo=min(min(q.a.xz,q.b.xz),min(q.c.xz,q.d.xz));
     float2 hi=max(max(q.a.xz,q.b.xz),max(q.c.xz,q.d.xz));
-    int2 begin=max(0,(int2)floor((lo-_Area.xy)*_Area.z*2048));
-    int2 end=min(2047,(int2)ceil((hi-_Area.xy)*_Area.z*2048));
+    float pixel=1/(1024*_Area.z);
+    if(pixel>.75) { lo-=pixel*.7072; hi+=pixel*.7072; }
+    int2 begin=max(0,(int2)floor((lo-_Area.xy)*_Area.z*1024));
+    int2 end=min(1023,(int2)ceil((hi-_Area.xy)*_Area.z*1024));
     for(int y=begin.y+thread.y;y<=end.y;y+=8)
     for(int x=begin.x+thread.x;x<=end.x;x+=8) {
-        float2 p=_Area.xy+(float2(x,y)+.5)/(2048*_Area.z);
+        float2 p=_Area.xy+(float2(x,y)+.5)/(1024*_Area.z);
         float h,pressure,side;
 
+        uint wear;
+        if(pixel>.75) {
+            float filtered;
+            if(!CoarseLane(p,q,pixel,h,filtered)) continue;
+            wear=(uint)round(255*filtered);
+        } else {
         bool covered=Triangle(p,q.a,q.c,q.b,float3(-1,-1,1),h,pressure,side);
         [branch] if(!covered) covered=Triangle(p,q.b,q.c,q.d,float3(1,-1,1),h,pressure,side);
         if(!covered) continue;
         float broad=LaneNoise(p*.23), grain=LaneNoise(p*1.7+17.3);
 
-        float detail=1-smoothstep(.10,.28,1/(2048*_Area.z));
+        float detail=1-smoothstep(.10,.28,1/(1024*_Area.z));
         float crust=lerp(.5,LaneNoise(p*5.4-9.1),detail);
         float irregular=.55*broad+.30*grain+.15*crust;
         float shifted=abs(side+(broad-.5)*.12);
@@ -51,18 +116,39 @@ void Raster(uint3 group:SV_GroupID,uint3 thread:SV_GroupThreadID) {
         float boundary=.70+.13*broad+(grain-.5)*.19+(crust-.5)*.10;
         float feather=lerp(.12,.055,detail);
         float edge=1-smoothstep(boundary-feather,boundary+feather,shifted);
-        float rut=exp(-pow((shifted*q.shape.x*.5-(.67+.10*broad)) / (.25+.07*grain),2));
-        float spread=lerp(.30,1,smoothstep(.15,.85,pressure));
+        float wheelOffset=min(.67+.10*broad,q.shape.x*.26);
+        float rut=exp(-pow((shifted*q.shape.x*.5-wheelOffset) / (.25+.07*grain),2));
+        float spread=LaneCompaction(saturate(pressure));
 
         float clumps=lerp(.48+.52*irregular,1,smoothstep(.75,1,pressure));
 
         float fragments=smoothstep(.57,.76,.65*grain+.35*crust)*smoothstep(.20,.38,shifted)
             *(1-smoothstep(.48,.64,shifted));
         clumps*=1-fragments*.10;
-        uint wear=(uint)round(255*.95*saturate(pressure)*edge*lerp(spread,1,rut)*clumps);
+        wear=(uint)round(255*.95*saturate(pressure)*edge*lerp(spread,1,rut)*clumps);
+        if(q.shape.y>.5) {
+            float railDistance=abs(abs(side*q.shape.x*.5)-.7175);
+            float railCoverage=1-smoothstep(.035,.035+max(.025,pixel*.55),railDistance);
+            wear=max(wear,(uint)round(255*.95*railCoverage));
+        }
+        }
         if(wear==0) continue;
         uint encodedHeight=(uint)clamp(round((h+1024)*20),0,16777215);
-        uint previous;
-        InterlockedMax(_Output[int2(x,y)],(encodedHeight<<8)|wear,previous);
+        // Compare/exchange merges coverage at one elevation; it never replaces a
+        // neighbour lane with the larger value and never mixes bridge decks.
+        bool inserted=false;
+        [loop] for(int layer=0;layer<4 && !inserted;layer++) {
+            int3 address=int3(x,y,layer);
+            uint current=_Output[address];
+            [allow_uav_condition] [loop] while(true) {
+                if(current!=0 && abs((int)(current>>8)-(int)encodedHeight)>=(pixel>.75?12:4)) break;
+                uint combined=pixel>.75?min(242,(current&255)+wear):max(current&255,wear);
+                uint value=((current==0?encodedHeight:current>>8)<<8)|combined;
+                uint previous;
+                InterlockedCompareExchange(_Output[address],current,value,previous);
+                if(previous==current) { inserted=true; break; }
+                current=previous;
+            }
+        }
     }
 }

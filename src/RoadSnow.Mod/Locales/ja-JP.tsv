@@ -39,3 +39,9 @@ desc.WriteDiagnostics	都市の読み込み後、天候、描画、パフォー�
 quality.Low	低
 quality.Balanced	バランス
 quality.High	高
+
+label.RealisticSnow	リアルモード
+desc.RealisticSnow	足跡やタイヤ跡の周囲に押し出された雪を加え、摩耗した車線の間に雪を積もらせます。車輪が雪を変形させます。描画範囲と形状数はカメラ周辺に制限されます。無効にすると描画負荷が下がります。 実験的な機能です。不具合が発生したり、パフォーマンスが低下したりする可能性があります。リアルモードは設定でいつでも無効にできます。
+label.RealisticSnowWarning	実験的なリアルモード
+desc.RealisticSnowWarning	実験的な機能です。不具合が発生したり、パフォーマンスが低下したりする可能性があります。リアルモードは設定でいつでも無効にできます。
+label.Acknowledge	了解

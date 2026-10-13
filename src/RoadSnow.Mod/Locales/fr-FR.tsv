@@ -39,3 +39,9 @@ desc.WriteDiagnostics	Lorsqu'une ville est chargée, enregistre les données mé
 quality.Low	Faible
 quality.Balanced	Équilibré
 quality.High	Élevé
+
+label.RealisticSnow	Mode réaliste
+desc.RealisticSnow	Ajoute des bourrelets de neige autour des traces et des accumulations entre les voies usées. Les roues déforment cette neige. Les détails sont limités autour de la caméra avec un budget de géométrie fixe ; désactivez pour réduire la charge graphique. Expérimental : peut présenter des bugs et réduire les performances. Vous pouvez désactiver le mode réaliste à tout moment dans les paramètres.
+label.RealisticSnowWarning	Mode réaliste expérimental
+desc.RealisticSnowWarning	Expérimental : peut présenter des bugs et réduire les performances. Vous pouvez désactiver le mode réaliste à tout moment dans les paramètres.
+label.Acknowledge	Compris

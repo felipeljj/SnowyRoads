@@ -30,7 +30,7 @@ internal sealed class RoadPatch : IDisposable
     private readonly int[] _triangles;
     private readonly Bounds _bounds;
     private readonly Bounds[] _rowBounds;
-    private readonly int _indicesPerRow;
+    private readonly int[] _rowStarts;
     private readonly SnowTransition _transition = new();
     private readonly ResidualSnow _residual = new();
     private readonly float[] _retention;
@@ -39,6 +39,14 @@ internal sealed class RoadPatch : IDisposable
     private int _uploadedRevision = -1;
     public RoadSnowField Field { get; }
     public Vector3 Center { get; }
+    public float ResidualDepth => _residual.DepthMm;
+
+    public void RestoreResidual(float depth)
+    {
+        _residual.Restore(depth);
+        Dirty = true;
+    }
+
     public bool NeedsSeed { get; private set; } = true;
     public bool Dirty { get; set; } = true;
     public bool Pedestrian { get; }
@@ -52,18 +60,64 @@ internal sealed class RoadPatch : IDisposable
     public Vector3[] SamplePositions { get; private set; }
     public SnowBankBand[] BankBands { get; }
     public Bounds Bounds => _bounds;
-    public Texture2D BankTexture => _slot.Texture;
+    public Vector4 BankMetadata(Vector2 uv)
+    {
+        int x = Mathf.Clamp(Mathf.RoundToInt(uv.x * (Field.Columns - 1)), 0, Field.Columns - 1);
+        int y = Mathf.Clamp(Mathf.RoundToInt(uv.y * (Field.Rows - 1)), 0, Field.Rows - 1);
+        return (Color)_pixels[y * Field.Columns + x];
+    }
 
-    public Vector2 BankUV(Vector2 uv) => _slot.MapUV(uv);
+    public CachedCoverage.Surface CacheSurface()
+    {
+        if (_nodeGeometry.HasValue)
+            return new CachedCoverage.Surface
+            {
+                Center = Center,
+                Vertices = _vertices,
+                Indices = _triangles,
+            };
+        int stride = _vertices.Length / (Steps + 1);
+        var vertices = new Vector3[5 * stride];
+        var indices = new int[4 * (stride - 1) * 6];
+        for (int row = 0; row < 5; row++)
+            Array.Copy(_vertices, row * 3 * stride, vertices, row * stride, stride);
+        int at = 0;
+        for (int row = 0; row < 4; row++)
+        for (int col = 0; col < stride - 1; col++)
+        {
+            int a = row * stride + col,
+                b = a + stride;
+            indices[at++] = a;
+            indices[at++] = b;
+            indices[at++] = a + 1;
+            indices[at++] = a + 1;
+            indices[at++] = b;
+            indices[at++] = b + 1;
+        }
+        return new CachedCoverage.Surface
+        {
+            Center = Center,
+            Vertices = vertices,
+            Indices = indices,
+        };
+    }
 
-    public SnowBankMesh BuildBankMesh(int lod) =>
-        SnowBankMesh.Build(
+    public bool HasRoadBanks => !_nodeGeometry.HasValue && _profile != null && !Pedestrian;
+
+    public SnowBankMesh BuildBankMesh(int lod, bool realistic = false)
+    {
+        var mesh = SnowBankMesh.Build(
             BankBands,
             Field.WidthMeters,
             Field.LengthMeters,
             lod,
             (u, t, h) => SurfacePoint(u, t, h)
         );
+        if (realistic && HasRoadBanks)
+            mesh.AddRoadbeds(_profile, Field.WidthMeters, Field.LengthMeters, lod,
+                (u, t, h) => SurfacePoint(u, t, h));
+        return mesh;
+    }
 
     public RoadPatch(
         Segment segment,
@@ -81,7 +135,10 @@ internal sealed class RoadPatch : IDisposable
         bool detailed = true,
         EdgeNodeGeometry? nodeGeometry = null,
         float middleAcross = 0.5f,
-        SurfaceBand[] profile = null
+        SurfaceBand[] profile = null,
+        float4? syncLeft = null,
+        float4? syncRight = null,
+        JunctionSurface.MeshData nativeJunction = null
     )
     {
         _segment = segment;
@@ -125,31 +182,13 @@ internal sealed class RoadPatch : IDisposable
         _leftPoints = new Vector3[Steps + 1];
         _rightPoints = new Vector3[Steps + 1];
         var acrossPoints = new List<(float U, float Height)>();
-        if (profile != null)
+        if (profile != null && !nodeGeometry.HasValue)
         {
             foreach (var band in profile)
             {
                 float a = (band.Left + width / 2) / width;
                 float b = (band.Right + width / 2) / width;
                 acrossPoints.Add((a, band.Height));
-                if (nodeGeometry.HasValue)
-                {
-                    foreach (
-                        float seam in new[]
-                        {
-                            _middleAcross * 0.5f,
-                            _middleAcross,
-                            (1 + _middleAcross) * 0.5f,
-                        }
-                    )
-                    {
-                        if (a < seam && b > seam)
-                        {
-                            acrossPoints.Add((seam, band.Height));
-                        }
-                    }
-                }
-
                 acrossPoints.Add((b, band.Height));
             }
         }
@@ -162,15 +201,17 @@ internal sealed class RoadPatch : IDisposable
 
         int acrossSteps = acrossPoints.Count - 1;
         int stride = acrossSteps + 1;
-        var vertices = new Vector3[(Steps + 1) * stride];
+        var vertices = new Vector3[nodeGeometry.HasValue ? 0 : (Steps + 1) * stride];
         var uv = new Vector2[vertices.Length];
-        var triangles = new int[Steps * acrossSteps * 6];
+        var triangles = new int[nodeGeometry.HasValue ? 0 : Steps * acrossSteps * 6];
         for (int i = 0; i <= Steps; i++)
         {
             float fraction = i / (float)Steps;
             _centers[i] = SurfacePoint(0.5f, fraction);
             _leftPoints[i] = SurfacePoint(0, fraction);
             _rightPoints[i] = SurfacePoint(1, fraction);
+            if (nodeGeometry.HasValue)
+                continue;
             for (int x = 0; x <= acrossSteps; x++)
             {
                 int v = i * stride + x;
@@ -191,19 +232,45 @@ internal sealed class RoadPatch : IDisposable
             }
         }
 
+        if (nodeGeometry.HasValue)
+        {
+            var junction = nativeJunction ?? JunctionSurface.Build(
+                nodeGeometry.Value,
+                width,
+                _middleAcross,
+                profile,
+                height,
+                syncLeft,
+                syncRight
+            );
+            if (nativeJunction == null) JunctionSurface.CloseLiftedEdges(junction, height);
+            vertices = junction.Vertices.ConvertAll(p => (Vector3)p).ToArray();
+            triangles = junction.Indices.ToArray();
+            uv = new Vector2[vertices.Length];
+            _rowStarts = junction.RowStarts.ToArray();
+        }
+        else
+        {
+            _rowStarts = new int[Steps + 1];
+            for (int i = 0; i <= Steps; i++)
+                _rowStarts[i] = i * acrossSteps * 6;
+        }
         Center = _centers[Steps / 2];
         _vertices = vertices;
         _uv = uv;
         _triangles = triangles;
-        _indicesPerRow = acrossSteps * 6;
-        _rowBounds = new Bounds[Steps];
-        for (int row = 0; row < Steps; row++)
+        _rowBounds = new Bounds[_rowStarts.Length - 1];
+        for (int row = 0; row < _rowBounds.Length; row++)
         {
-            var bounds = new Bounds(vertices[row * stride], Vector3.zero);
-            for (int x = 0; x < stride; x++)
+            int first = _rowStarts[row],
+                end = _rowStarts[row + 1];
+            var bounds = new Bounds(
+                first < end ? vertices[triangles[first]] : Center,
+                Vector3.zero
+            );
+            for (int index = first; index < end; index++)
             {
-                bounds.Encapsulate(vertices[row * stride + x]);
-                bounds.Encapsulate(vertices[(row + 1) * stride + x]);
+                bounds.Encapsulate(vertices[triangles[index]]);
             }
 
             bounds.Expand(new Vector3(0.02f, 5, 0.02f));
@@ -383,7 +450,7 @@ internal sealed class RoadPatch : IDisposable
             return true;
         }
 
-        if (!extendEndpoints)
+        if (!extendEndpoints || _nodeGeometry.HasValue)
         {
             local = default;
             return false;
@@ -463,15 +530,15 @@ internal sealed class RoadPatch : IDisposable
 
         float nearest = 2.5f;
         bool found = false;
-        for (int row = 0; row < Steps; row++)
+        for (int row = 0; row < _rowBounds.Length; row++)
         {
             if (!_rowBounds[row].Contains(world))
             {
                 continue;
             }
 
-            int end = (row + 1) * _indicesPerRow;
-            for (int i = row * _indicesPerRow; i < end; i += 3)
+            int end = _rowStarts[row + 1];
+            for (int i = _rowStarts[row]; i < end; i += 3)
             {
                 int ia = _triangles[i];
                 int ib = _triangles[i + 1];
@@ -584,19 +651,6 @@ internal sealed class RoadPatch : IDisposable
                 {
                     profileHeight = band.Height;
                     break;
-                }
-            }
-        }
-
-        if (_nodeGeometry.HasValue && _nodeGeometry.Value.m_MiddleRadius > 0 && _profile != null)
-        {
-            var node = _nodeGeometry.Value;
-            float radius = math.distance(position.xz, node.m_Middle.d.xz);
-            if (radius < node.m_MiddleRadius + 0.1f)
-            {
-                foreach (var band in _profile)
-                {
-                    profileHeight = Mathf.Max(profileHeight, band.Height);
                 }
             }
         }

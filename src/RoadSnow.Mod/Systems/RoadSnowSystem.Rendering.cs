@@ -103,8 +103,11 @@ public partial class RoadSnowSystem
         _material.SetFloat("_ZTestDepthEqualForOpaque", (float)CompareFunction.LessEqual);
         _material.SetFloat("_CullModeForward", (float)CullMode.Off);
         _atlas = new SnowAtlas(_material);
+        _distantMarks = new TrafficMarks(null, _wearHistory, true);
         _trafficMarks = new TrafficMarks(trackProbe, _wearHistory);
-        _laneWearMask = new LaneWearMask(laneRaster);
+        _laneWearMask = new LaneWearMask(laneRaster, _laneHistory, _laneLayout);
+        _plowShader = _shaderBundle.LoadAsset<Shader>("Assets/RoadSnow/PlowBanks.shader");
+        _cacheShader = _shaderBundle.LoadAsset<Shader>("Assets/RoadSnow/CachedSurface.shader");
         var bankShader = _shaderBundle.LoadAsset<Shader>("Assets/RoadSnow/Banks.shader");
         var facilityShader = _shaderBundle.LoadAsset<Shader>("Assets/RoadSnow/Facility.shader");
         if (bankShader != null && bankShader.isSupported)
@@ -115,6 +118,12 @@ public partial class RoadSnowSystem
         if (facilityShader != null && facilityShader.isSupported)
         {
             _facilities = new FacilitySurfaces(EntityManager, _material, facilityShader);
+            _terrainMarks = new TerrainMarks(
+                _terrainSystem,
+                _wearHistory,
+                _material,
+                facilityShader
+            );
         }
 
         Mod.log.Info("Road overlay material created with " + _surfaceShader.name);
@@ -123,9 +132,14 @@ public partial class RoadSnowSystem
 
     public void ReleaseOverlays()
     {
+        _plowedSnow.Dispose();
+        _cachedCoverage.Dispose();
         _snowBanks?.Dispose();
         _snowBanks = null;
         _facilities?.Dispose();
+        _terrainMarks?.Dispose();
+        _terrainMarks = null;
+        _terrainHeights = default;
         _facilities = null;
         _refreshScan?.Dispose();
         _refreshScan = null;
@@ -137,8 +151,12 @@ public partial class RoadSnowSystem
         _patches.Clear();
         _patchesByRoad.Clear();
         _vehicleHistory.Clear();
+        _singleTrackPrefabs.Clear();
+        _plowHistory.Clear();
+        _trainHistory.Clear();
         _pedestrianHistory.Clear();
         _surfaceCache.Clear();
+        _nativeJunctions.Clear();
         _desiredByEdge.Clear();
         _keysByEdge.Clear();
         _desired.Clear();
@@ -147,6 +165,8 @@ public partial class RoadSnowSystem
         _trafficKeys.Clear();
         _activePatches.Clear();
         _touched.Clear();
+        _distantMarks?.Dispose();
+        _distantMarks = null;
         _trafficMarks?.Dispose();
         _trafficMarks = null;
         _laneWearMask?.Dispose();
@@ -154,6 +174,11 @@ public partial class RoadSnowSystem
         _atlas?.Dispose();
         _atlas = null;
         _snowSnapshot = null;
+        _nativeSnowPresent = true;
+        _dormant = false;
+        _performanceCalls = _performanceDryCalls = 0;
+        _performanceTotal = _performanceMaximum = 0;
+        _performanceNext = 0;
         _readbackPending = false;
         _generation++;
         _snowSnapshotVersion = _snowCursor = _pendingHead = 0;

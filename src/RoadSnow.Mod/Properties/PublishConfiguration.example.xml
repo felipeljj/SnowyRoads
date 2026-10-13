@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Publish>
+  <!-- Copy to PublishConfiguration.xml, then restore the EXISTING listing's values.
+       Blank required fields prevent publishing an unfinished configuration. -->
+  <ModId Value="" />
+  <DisplayName Value="Snowy Roads" />
+  <ShortDescription Value="Snow overlays, tire tracks, footprints and snowbanks for Cities: Skylines II." />
+  <!-- Paste the existing description at column zero, preserving its formatting. -->
+  <LongDescription></LongDescription>
+  <Thumbnail Value="Properties/Thumbnail.png" />
+  <!-- Use the next public version, not necessarily the internal test-build number. -->
+  <ModVersion Value="" />
+  <GameVersion Value="1.6.2f1" />
+  <!-- Keep the listing's existing visibility, screenshots, tags and dependencies. -->
+  <AccessLevel Value="Public" />
+  <ExternalLink Type="github" Url="https://github.com/felipeljj/SnowyRoads" />
+  <ChangeLog>
+Improved intersection geometry, curb coverage, snow lighting and LOD transitions.
+Traffic wear preserves compacted snow between cleaner wheel paths; motorcycles leave one central track.
+Reduced unnecessary track-history processing and GPU page-table uploads.
+Improved snowbank stability and added experimental realistic snow, enabled by default for new settings.
+  </ChangeLog>
+</Publish>

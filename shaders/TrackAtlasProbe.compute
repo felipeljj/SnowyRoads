@@ -1,6 +1,7 @@
 #pragma kernel CSMain
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
 SAMPLER(s_linear_clamp_sampler);
+SAMPLER(s_linear_repeat_sampler);
 SAMPLER(s_point_clamp_sampler);
 #include "Assets/RoadSnow/SnowCommon.hlsl"
 float4 _ProbePosition;

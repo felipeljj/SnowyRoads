@@ -39,3 +39,9 @@ desc.WriteDiagnostics	Con una ciudad cargada, guarda datos del clima, renderizad
 quality.Low	Bajo
 quality.Balanced	Equilibrado
 quality.High	Alto
+
+label.RealisticSnow	Modo realista
+desc.RealisticSnow	Añade bordes de nieve desplazada junto a las huellas y acumulaciones entre los carriles desgastados. Las ruedas deforman la nieve. El detalle se limita al entorno de la cámara y a un presupuesto de geometría; desactívalo para reducir el trabajo gráfico. Experimental: puede presentar errores y reducir el rendimiento. Puedes desactivar el modo realista en cualquier momento en los ajustes.
+label.RealisticSnowWarning	Modo realista experimental
+desc.RealisticSnowWarning	Experimental: puede presentar errores y reducir el rendimiento. Puedes desactivar el modo realista en cualquier momento en los ajustes.
+label.Acknowledge	Entendido
