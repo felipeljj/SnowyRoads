@@ -13,13 +13,13 @@ public static class BuildRoadSnowShader
     [MenuItem("Tools/Snowy Roads/Build Shader Bundle")]
     public static void Build()
     {
-        string output = EditorUtility.OpenFolderPanel(
-            "Select the repository's assets folder",
-            "",
-            ""
-        );
+        string output = Environment.GetEnvironmentVariable("ROADSNOW_SHADER_OUTPUT");
+        if (string.IsNullOrEmpty(output) && !Application.isBatchMode)
+            output = EditorUtility.OpenFolderPanel("Select the repository's assets folder", "", "");
         if (string.IsNullOrEmpty(output))
         {
+            if (Application.isBatchMode)
+                throw new Exception("Set ROADSNOW_SHADER_OUTPUT for a batch shader build.");
             return;
         }
 
@@ -64,13 +64,20 @@ public static class BuildRoadSnowShader
         // kept daylight on the snow after the sky had already turned dark.
         string builtin = File.ReadAllText(package + "LitBuiltinData.hlsl");
         const string postInit = "PostInitBuiltinData(V, posInput, surfaceData, builtinData);";
-        if (!builtin.Contains(postInit)) throw new Exception("Missing native GI initialization.");
-        builtin = builtin.Replace(postInit, @"
+        if (!builtin.Contains(postInit))
+            throw new Exception("Missing native GI initialization.");
+        builtin = builtin.Replace(
+            postInit,
+            @"
     builtinData.bakeDiffuseLighting = SnowAmbient(bentNormalWS);
     builtinData.backBakeDiffuseLighting = SnowAmbient(-input.tangentToWorld[2]);
-    " + postInit);
+    " + postInit
+        );
         File.WriteAllText("Assets/RoadSnow/SnowBuiltinData.hlsl", builtin);
-        data = data.Replace(package + "LitBuiltinData.hlsl", "Assets/RoadSnow/SnowBuiltinData.hlsl");
+        data = data.Replace(
+            package + "LitBuiltinData.hlsl",
+            "Assets/RoadSnow/SnowBuiltinData.hlsl"
+        );
         string meshModification = File.ReadAllText(package + "LitDataMeshModification.hlsl");
         const string vertexAnchor =
             "void ApplyVertexModification(AttributesMesh input, float3 normalWS, inout float3 positionRWS, float3 timeParameters)";
@@ -86,7 +93,7 @@ public static class BuildRoadSnowShader
             @"
 #if defined(ROADSNOW_BANKS)
     float3 bankBase=GetAbsolutePositionWS(positionRWS); bankBase.y=input.uv2.x;
-    float4 bankMetadata=float4(input.uv3.x,1,0,input.uv3.y);
+    float4 bankMetadata=float4(input.uv3.x,1,max(0,-input.uv3.y-1),input.uv3.y);
     positionRWS.y+=input.uv2.y*(SnowBankScale(bankBase,bankMetadata)-1);
 #endif
 "
@@ -106,7 +113,7 @@ public static class BuildRoadSnowShader
     snowSamplePosition.y=input.texCoord2.x;
 #endif
 #if defined(ROADSNOW_BANKS)
-    float4 snowMetadata = float4(input.texCoord3.x,1,0,input.texCoord3.y);
+    float4 snowMetadata = float4(input.texCoord3.x,1,max(0,-input.texCoord3.y-1),input.texCoord3.y);
 #else
     float4 snowMetadata = SAMPLE_UVMAPPING_TEXTURE2D(_BaseColorMap, sampler_BaseColorMap, layerTexCoord.base);
 #endif
@@ -114,7 +121,12 @@ public static class BuildRoadSnowShader
     clip(snowMetadata.a - .5);
 #endif
     float snowDepth, retainedDepth, fineWear;
+#if !defined(ROADSNOW_BANKS) && !defined(ROADSNOW_FACILITY)
+    alpha = SnowCoverage(snowSamplePosition, snowMetadata, snowDepth, retainedDepth, fineWear,
+        snowMetadata.b * input.texCoord2.x) * _BaseColor.a;
+#else
     alpha = SnowCoverage(snowSamplePosition, snowMetadata, snowDepth, retainedDepth, fineWear) * _BaseColor.a;
+#endif
 #if defined(ROADSNOW_BANKS)
     float bankScale=SnowBankScale(snowSamplePosition,snowMetadata);
     alpha*=smoothstep(.0003,.003,input.texCoord2.y*bankScale);
@@ -205,7 +217,7 @@ public static class BuildRoadSnowShader
         source = Regex.Replace(source, @"(?m)^\s*#pragma shader_feature[^\r\n]*", "");
         source = source.Replace(
             "HLSLINCLUDE",
-            "HLSLINCLUDE\n#define _SURFACE_TYPE_TRANSPARENT\n#define _ENABLE_FOG_ON_TRANSPARENT\n#define _DISABLE_DECALS\n#define _DISABLE_SSR_TRANSPARENT\n#define _NORMALMAP_TANGENT_SPACE"
+            "HLSLINCLUDE\n#define _REQUIRE_UV2\n#define _SURFACE_TYPE_TRANSPARENT\n#define _ENABLE_FOG_ON_TRANSPARENT\n#define _DISABLE_DECALS\n#define _DISABLE_SSR_TRANSPARENT\n#define _NORMALMAP_TANGENT_SPACE"
         );
         source = Regex.Replace(
             source,
@@ -257,14 +269,20 @@ public static class BuildRoadSnowShader
         source = source.Replace("#define USE_FPTL_LIGHTLIST", "");
         Directory.CreateDirectory("Assets/RoadSnow");
         File.WriteAllText("Assets/RoadSnow/Surface.shader", source);
-        File.WriteAllText("Assets/RoadSnow/CachedSurface.shader",
-            source.Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/CachedSurface\"")
-                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_CACHE"));
+        File.WriteAllText(
+            "Assets/RoadSnow/CachedSurface.shader",
+            source
+                .Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/CachedSurface\"")
+                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_CACHE")
+        );
         File.WriteAllText(
             "Assets/RoadSnow/Banks.shader",
             source
                 .Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/Banks\"")
-                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define _REQUIRE_UV2\n#define _REQUIRE_UV3")
+                .Replace(
+                    "HLSLINCLUDE",
+                    "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define _REQUIRE_UV2\n#define _REQUIRE_UV3"
+                )
         );
         File.WriteAllText(
             "Assets/RoadSnow/Facility.shader",
@@ -272,9 +290,15 @@ public static class BuildRoadSnowShader
                 .Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/Facility\"")
                 .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_FACILITY")
         );
-        File.WriteAllText("Assets/RoadSnow/PlowBanks.shader",
-            source.Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/PlowBanks\"")
-                .Replace("HLSLINCLUDE", "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define ROADSNOW_PLOW\n#define _REQUIRE_UV2\n#define _REQUIRE_UV3"));
+        File.WriteAllText(
+            "Assets/RoadSnow/PlowBanks.shader",
+            source
+                .Replace("Shader \"RoadSnow/Surface\"", "Shader \"RoadSnow/PlowBanks\"")
+                .Replace(
+                    "HLSLINCLUDE",
+                    "HLSLINCLUDE\n#define ROADSNOW_BANKS\n#define ROADSNOW_PLOW\n#define _REQUIRE_UV2\n#define _REQUIRE_UV3"
+                )
+        );
         AssetDatabase.Refresh();
         var shader = AssetDatabase.LoadAssetAtPath<Shader>("Assets/RoadSnow/Surface.shader");
         if (shader == null || ShaderUtil.ShaderHasError(shader))

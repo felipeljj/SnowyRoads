@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using RoadSnow.Core;
-using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
@@ -29,20 +29,63 @@ internal sealed class TrafficMarks : IDisposable
     private readonly ComputeBuffer _probeResult;
     private Vector4 _area;
     private bool _disposed;
-    private readonly Texture2D _texture;
+    private readonly TileTextureAtlas _atlas;
+    private Texture2D _texture => _atlas.Texture;
     private readonly List<Candidate> _candidates = new();
+    private readonly List<Candidate> _probeCandidates = new();
+    private readonly List<Candidate> _geometryCandidates = new();
+    private readonly List<WearTile> _nearbyTiles = new();
+    private readonly ExactSequence<Candidate> _activeCandidates = new();
+    private WearView.Snapshot _selectionView;
+    private int _viewTopology = -1;
+    private int _viewHistoryCount;
+    private bool _viewReady;
+    private bool _selectionReady;
+    private int _selectionBudget;
+    private int _originX,
+        _originZ;
+    public int SelectionBuilds { get; private set; }
+    public int SelectionReuses { get; private set; }
+    public int UploadedTiles { get; private set; }
+    public int WeatherOnlyReuses { get; private set; }
+    public long UploadedBytes => _atlas.UploadedBytes;
+    public bool PartialUploads => _atlas.PartialUploads;
     private readonly HashSet<WearTile> _selected = new();
     private readonly Dictionary<WearTile, Slot> _slots = new();
     private readonly List<WearTile> _evict = new();
     private readonly List<int> _free = new();
-    private readonly Color32[] _upload;
+    private readonly WearOverviewCache _overviews = new();
+    private readonly WeatherOverviewCache _weatherOverviews = new();
+    public long WeatherOverviewReuses => _weatherOverviews.WeatherReuses;
+    public long HistoryReadTicks { get; private set; }
+    public long ReductionTicks { get; private set; }
+    public long TextureCopyTicks { get; private set; }
+    public long AtlasApplyTicks { get; private set; }
+    public long PageUploadTicks { get; private set; }
+    public int OverviewReuses { get; private set; }
+    public int OverviewBuilds { get; private set; }
+    public long OverviewBlocksBuilt => _overviews.BlocksBuilt;
+    public long OverviewBlocksRetained => _overviews.BlocksRetained;
+
+    public void ResetTimings()
+    {
+        HistoryReadTicks =
+            ReductionTicks =
+            TextureCopyTicks =
+            AtlasApplyTicks =
+            PageUploadTicks =
+                0;
+    }
+
     private int _weatherCursor;
     private int _uploadCursor;
     private readonly HashSet<WearTile> _uploadSelection = new();
+    private readonly List<WearTile> _urgentPlowUploads = new();
+    public int PendingUploadTiles { get; private set; }
     private int _drawRevision = -1;
     private int _drawSnapshot = -1;
     private int _drawBudget;
-    private Matrix4x4 _drawView;
+    private WearView.Snapshot _drawView;
     private bool _drawSnowing;
     public int Drawn { get; private set; }
     public int Stored => _history.Tiles.Count;
@@ -54,7 +97,17 @@ internal sealed class TrafficMarks : IDisposable
     private bool _snowing;
     private double _snowfallTotal = -1;
     private double _drawSnowfallTotal = -1;
-    public int LiveTiles { get; private set; }
+    public int LiveTiles
+    {
+        get
+        {
+            int count = 0;
+            foreach (var tile in _history.Tiles)
+                if (!tile.Empty)
+                    count++;
+            return count;
+        }
+    }
     public int ViewCandidates { get; private set; }
     public Vector3 ProbePoint { get; private set; }
     public float ProbeExpected { get; private set; }
@@ -71,15 +124,9 @@ internal sealed class TrafficMarks : IDisposable
         PageSide = distant ? 512 : 128;
         _pagePixels = new Color32[PageSide * PageSide * PageLayers];
         _pageLayers = new int[PageSide * PageSide];
-        _upload = new Color32[TileResolution * TileResolution];
         _history = history;
         _tileDepth = tile => _depth(new Vector3(tile.WeatherX, tile.CenterY, tile.WeatherZ));
-        _texture = new Texture2D(AtlasSize, AtlasSize, TextureFormat.RGBA32, false, true)
-        {
-            name = "RoadSnow individual impressions",
-            filterMode = FilterMode.Bilinear,
-            wrapMode = TextureWrapMode.Clamp,
-        };
+        _atlas = new TileTextureAtlas(AtlasSize, TileResolution);
         _pages = new Texture2D(PageSide, PageSide * PageLayers, TextureFormat.RGBA32, false, true)
         {
             name = "RoadSnow impression page table",
@@ -133,7 +180,8 @@ internal sealed class TrafficMarks : IDisposable
             _depth == null ? null : _tileDepth,
             _weatherVersion,
             _snowing,
-            _snowfallTotal
+            _snowfallTotal,
+            roundCaps: plow
         );
 
     public void SetWeather(
@@ -148,6 +196,140 @@ internal sealed class TrafficMarks : IDisposable
         _snowing = snowing;
         _snowfallTotal = snowfallTotal;
     }
+
+    public PlowFeather PlowFeather { get; set; }
+
+    public void ConfigurePlowFeather(PlowFeather feather) => PlowFeather = feather;
+
+    public int ImmediatePlowUploads { get; private set; }
+
+    // Existing visible pages must not wait behind the distant background queue.
+    // Reuse the exact same image preparation as normal drawing, then upload both
+    // atlases before this frame renders. New/offscreen pages keep normal discovery.
+    public void RefreshPlowTiles(List<WearTile> changed)
+    {
+        if (changed.Count == 0)
+            return;
+        _drawRevision = -1;
+        bool uploaded = false,
+            pagesChanged = false;
+        foreach (var tile in changed)
+        {
+            if (tile.Empty)
+                continue;
+            bool resident = _slots.TryGetValue(tile, out var slot);
+            int newPage = -1;
+            if (!resident && !AllocatePlowPage(tile, out slot, out newPage))
+                continue;
+            if (resident && tile.PlowSequence <= slot.PlowSequence)
+                continue;
+            UploadImage(tile, ref slot);
+            _slots[tile] = slot;
+            uploaded = true;
+            ImmediatePlowUploads++;
+            if (newPage >= 0)
+            {
+                var entry = _pagePixels[newPage];
+                entry.r = (byte)(slot.Index % SlotsPerSide);
+                entry.g = (byte)(slot.Index / SlotsPerSide);
+                entry.a = 255;
+                _pagePixels[newPage] = entry;
+                _occupiedPages.Add(newPage);
+                _nextOccupiedPages.Add(newPage);
+                _selected.Add(tile);
+                pagesChanged = true;
+            }
+            if (!_distant)
+            {
+                int x = tile.X - _originX,
+                    z = tile.Z - _originZ;
+                if ((uint)x >= PageSide || (uint)z >= PageSide)
+                    continue;
+                for (int layer = 0; layer < PageLayers; layer++)
+                {
+                    int at = z * PageSide + x + layer * PageSide * PageSide;
+                    var entry = _pagePixels[at];
+                    if (entry.a == 0)
+                        break;
+                    if (
+                        entry.r == slot.Index % SlotsPerSide
+                        && entry.g == slot.Index / SlotsPerSide
+                        && entry.a != 255
+                    )
+                    {
+                        entry.a = 255;
+                        _pagePixels[at] = entry;
+                        pagesChanged = true;
+                    }
+                }
+            }
+        }
+        if (uploaded)
+        {
+            long started = Stopwatch.GetTimestamp();
+            _atlas.Flush();
+            AtlasApplyTicks += Stopwatch.GetTimestamp() - started;
+        }
+        if (pagesChanged)
+        {
+            long started = Stopwatch.GetTimestamp();
+            _pages.SetPixels32(_pagePixels);
+            _pages.Apply(false, false);
+            PageUploadTicks += Stopwatch.GetTimestamp() - started;
+        }
+    }
+
+    private bool AllocatePlowPage(WearTile tile, out Slot slot, out int pageIndex)
+    {
+        slot = default;
+        pageIndex = -1;
+        int x = tile.X - _originX,
+            z = tile.Z - _originZ;
+        if (!_viewReady || _free.Count == 0 || (uint)x >= PageSide || (uint)z >= PageSide)
+            return false;
+        var center = Center(tile);
+        var screen = _selectionView.Viewport(center);
+        if (
+            screen.z <= 0
+            || screen.x < -.15f
+            || screen.x > 1.15f
+            || screen.y < -.15f
+            || screen.y > 1.15f
+        )
+            return false;
+        float mpp = _selectionView.PixelSize((center - _selectionView.Eye).sqrMagnitude);
+        float fade = _distant ? 1 : 1 - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.25f, .65f, mpp));
+        int page = z * PageSide + x,
+            layer = _pageLayers[page];
+        if (fade <= 0 || layer >= PageLayers)
+            return false;
+        int last = _free.Count - 1;
+        slot = new Slot(_free[last], -1);
+        _free.RemoveAt(last);
+        pageIndex = page + layer * PageSide * PageSide;
+        _pageLayers[page]++;
+        _pagePixels[pageIndex] = new Color32(0, 0, (byte)Mathf.RoundToInt(fade * 255), 255);
+        return true;
+    }
+
+    public void AddPlowTriangle(Vector3 a, Vector3 b, Vector3 c) =>
+        _history.StampPlowTriangle(
+            a.x,
+            a.y,
+            a.z,
+            b.x,
+            b.y,
+            b.z,
+            c.x,
+            c.y,
+            c.z,
+            _depth((a + b + c) / 3),
+            _tileDepth,
+            _weatherVersion,
+            _snowing,
+            _snowfallTotal,
+            PlowFeather
+        );
 
     public void Draw(
         Camera camera,
@@ -185,12 +367,11 @@ internal sealed class TrafficMarks : IDisposable
     {
         SetWeather(depth, snapshotVersion, snowing, snowfallTotal);
         var cameraView = new WearView.Snapshot(camera);
-        Matrix4x4 view = cameraView.Matrix;
         if (
             _drawRevision == _history.Revision
             && _drawSnapshot == snapshotVersion
             && _drawBudget == budget
-            && _drawView == view
+            && _drawView.Equals(cameraView)
             && _drawSnowing == snowing
             && _drawSnowfallTotal == snowfallTotal
         )
@@ -203,7 +384,7 @@ internal sealed class TrafficMarks : IDisposable
         _drawRevision = _history.Revision;
         _drawSnapshot = snapshotVersion;
         _drawBudget = budget;
-        _drawView = view;
+        _drawView = cameraView;
         _drawSnowing = snowing;
         _drawSnowfallTotal = snowfallTotal;
         int count = _history.Tiles.Count;
@@ -215,56 +396,115 @@ internal sealed class TrafficMarks : IDisposable
             }
 
             var tile = _history.Tiles[_weatherCursor++];
-            tile.ObserveSnapshot(_tileDepth(tile), snowing, snapshotVersion, snowfallTotal);
+            ObserveWeather(tile);
         }
 
-        _candidates.Clear();
-        _selected.Clear();
-        Vector3 eye = cameraView.Eye;
-        LiveTiles = 0;
-        foreach (var tile in _history.Tiles)
+        SelectCandidates(cameraView, budget);
+        int originX = _originX,
+            originZ = _originZ;
+
+        _uploadSelection.Clear();
+        if (_distant)
         {
-            if (tile.Empty)
+            foreach (var candidate in _candidates)
+                ObserveWeather(candidate.Tile);
+            SelectUrgentPlowUploads();
+            int countToVisit = _candidates.Count;
+            for (int visited = 0; visited < countToVisit && _uploadSelection.Count < 32; visited++)
             {
-                continue;
-            }
-
-            LiveTiles++;
-            Vector3 center = Center(tile);
-            float distanceSquared = (center - eye).sqrMagnitude;
-            if (distanceSquared > (_distant ? 5000 * 5000 : 1600 * 1600))
-            {
-                continue;
-            }
-
-            float mpp = cameraView.PixelSize(distanceSquared);
-            if (!_distant && mpp >= 0.65f)
-            {
-                continue;
-            }
-
-            Vector3 screen = cameraView.Viewport(center);
-            if (
-                screen.z <= 0
-                || screen.x < -0.15f
-                || screen.x > 1.15f
-                || screen.y < -0.15f
-                || screen.y > 1.15f
-            )
-            {
-                continue;
-            }
-
-            float focusDistance = cameraView.Priority(screen, distanceSquared);
-            _candidates.Add(
-                new Candidate(
-                    tile,
-                    focusDistance,
-                    _distant ? 1 : 1 - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.25f, .65f, mpp))
+                if (_uploadCursor >= countToVisit)
+                    _uploadCursor = 0;
+                var tile = _candidates[_uploadCursor++].Tile;
+                if (
+                    !tile.Empty
+                    && (
+                        !_slots.TryGetValue(tile, out var cached)
+                        || cached.Revision != tile.Revision
+                    )
                 )
-            );
+                    _uploadSelection.Add(tile);
+            }
+        }
+        DrawSelected(originX, originZ);
+    }
+
+    private void SelectUrgentPlowUploads()
+    {
+        _urgentPlowUploads.Clear();
+        foreach (var candidate in _candidates)
+        {
+            var tile = candidate.Tile;
+            if (
+                !tile.Empty
+                && tile.PlowSequence > 0
+                && (
+                    !_slots.TryGetValue(tile, out var slot) || tile.PlowSequence > slot.PlowSequence
+                )
+            )
+                _urgentPlowUploads.Add(tile);
+        }
+        _urgentPlowUploads.Sort((a, b) => b.PlowSequence.CompareTo(a.PlowSequence));
+        for (int i = 0; i < Math.Min(8, _urgentPlowUploads.Count); i++)
+            _uploadSelection.Add(_urgentPlowUploads[i]);
+    }
+
+    private void ObserveWeather(WearTile tile)
+    {
+        // Checking here avoids sampling native snow before ObserveSnapshot's own
+        // early-out, including the second far/fine visit to the same history tile.
+        if (tile.WeatherVersion != _weatherVersion || tile.ObservedSnowfall != _snowfallTotal)
+            tile.ObserveSnapshot(_tileDepth(tile), _snowing, _weatherVersion, _snowfallTotal);
+    }
+
+    private void SelectCandidates(WearView.Snapshot cameraView, int budget)
+    {
+        bool sameView = _viewReady && _selectionView.Equals(cameraView);
+        if (!sameView || _viewTopology != _history.TopologyRevision)
+        {
+            bool appendOnly =
+                sameView
+                && _history.Tiles.Count >= _viewHistoryCount
+                && _history.TopologyRevision - _viewTopology
+                    == _history.Tiles.Count - _viewHistoryCount;
+            if (appendOnly)
+            {
+                for (int i = _viewHistoryCount; i < _history.Tiles.Count; i++)
+                    AddGeometryCandidate(_history.Tiles[i], cameraView);
+            }
+            else
+            {
+                _geometryCandidates.Clear();
+                float radius = _distant ? 5000 : 1600;
+                _history.QueryTiles(
+                    Mathf.FloorToInt((cameraView.Eye.x - radius) / WearHistory.TileMeters),
+                    Mathf.FloorToInt((cameraView.Eye.z - radius) / WearHistory.TileMeters),
+                    Mathf.FloorToInt((cameraView.Eye.x + radius) / WearHistory.TileMeters),
+                    Mathf.FloorToInt((cameraView.Eye.z + radius) / WearHistory.TileMeters),
+                    _nearbyTiles
+                );
+                foreach (var tile in _nearbyTiles)
+                    AddGeometryCandidate(tile, cameraView);
+            }
+            _selectionView = cameraView;
+            _viewTopology = _history.TopologyRevision;
+            _viewHistoryCount = _history.Tiles.Count;
+            _viewReady = true;
         }
 
+        _activeCandidates.Begin();
+        foreach (var candidate in _geometryCandidates)
+            if (!candidate.Tile.Empty)
+                _activeCandidates.Add(candidate);
+        bool changed = _activeCandidates.End();
+        if (_selectionReady && !changed && _selectionBudget == budget)
+        {
+            SelectionReuses++;
+            return;
+        }
+        _selectionReady = false;
+        _candidates.Clear();
+        _candidates.AddRange(_activeCandidates.Items);
+        _selected.Clear();
         _candidates.Sort(Candidate.ByDistance);
         ViewCandidates = _candidates.Count;
         Vector3 focus = _candidates.Count > 0 ? Center(_candidates[0].Tile) : Vector3.zero;
@@ -287,57 +527,66 @@ internal sealed class TrafficMarks : IDisposable
             ? SlotsPerSide * SlotsPerSide
             : Mathf.Clamp(budget / 8, 64, SlotsPerSide * SlotsPerSide);
         if (_candidates.Count > limit)
-        {
             _candidates.RemoveRange(limit, _candidates.Count - limit);
-        }
-
         foreach (var candidate in _candidates)
-        {
             _selected.Add(candidate.Tile);
-        }
-
         _evict.Clear();
         foreach (var entry in _slots)
-        {
             if (!_selected.Contains(entry.Key))
-            {
                 _evict.Add(entry.Key);
-            }
-        }
-
         foreach (var tile in _evict)
         {
             _free.Add(_slots[tile].Index);
             _slots.Remove(tile);
         }
-
         _candidates.Sort(Candidate.ByHeight);
-        _uploadSelection.Clear();
-        if (_distant)
+        _originX = originX;
+        _originZ = originZ;
+        _selectionBudget = budget;
+        _selectionReady = true;
+        SelectionBuilds++;
+    }
+
+    private void AddGeometryCandidate(WearTile tile, WearView.Snapshot cameraView)
+    {
+        Vector3 eye = cameraView.Eye;
+        Vector3 center = Center(tile);
+        float distanceSquared = (center - eye).sqrMagnitude;
+        if (distanceSquared > (_distant ? 5000 * 5000 : 1600 * 1600))
         {
-            foreach (var candidate in _candidates)
-                candidate.Tile.ObserveSnapshot(
-                    _tileDepth(candidate.Tile),
-                    snowing,
-                    snapshotVersion,
-                    snowfallTotal
-                );
-            int countToVisit = _candidates.Count;
-            for (int visited = 0; visited < countToVisit && _uploadSelection.Count < 24; visited++)
-            {
-                if (_uploadCursor >= countToVisit)
-                    _uploadCursor = 0;
-                var tile = _candidates[_uploadCursor++].Tile;
-                if (
-                    !tile.Empty
-                    && (
-                        !_slots.TryGetValue(tile, out var cached)
-                        || cached.Revision != tile.Revision
-                    )
-                )
-                    _uploadSelection.Add(tile);
-            }
+            return;
         }
+
+        float mpp = cameraView.PixelSize(distanceSquared);
+        if (!_distant && mpp >= 0.65f)
+        {
+            return;
+        }
+
+        Vector3 screen = cameraView.Viewport(center);
+        if (
+            screen.z <= 0
+            || screen.x < -0.15f
+            || screen.x > 1.15f
+            || screen.y < -0.15f
+            || screen.y > 1.15f
+        )
+        {
+            return;
+        }
+
+        float focusDistance = cameraView.Priority(screen, distanceSquared);
+        _geometryCandidates.Add(
+            new Candidate(
+                tile,
+                focusDistance,
+                _distant ? 1 : 1 - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.25f, .65f, mpp))
+            )
+        );
+    }
+
+    private void DrawSelected(int originX, int originZ)
+    {
         // Most 4 MiB distant page-table entries never change. Track occupied
         // entries so vehicle motion does not clear and upload the entire table.
         foreach (int occupied in _occupiedPages)
@@ -346,11 +595,15 @@ internal sealed class TrafficMarks : IDisposable
         bool pagesChanged = false;
         Drawn = 0;
         ProbeExpected = 0;
+        _probeCandidates.Clear();
         bool uploaded = false;
+        PendingUploadTiles = 0;
         foreach (var candidate in _candidates)
         {
             var tile = candidate.Tile;
-            tile.ObserveSnapshot(_tileDepth(tile), snowing, snapshotVersion, snowfallTotal);
+            ObserveWeather(tile);
+            if (!_distant)
+                tile.ResolveVisibleWeather();
             if (tile.Empty)
             {
                 continue;
@@ -365,15 +618,16 @@ internal sealed class TrafficMarks : IDisposable
 
             bool resident = _slots.TryGetValue(tile, out var slot);
             bool canUpload = !_distant || _uploadSelection.Contains(tile);
-            if (!canUpload && (!resident || slot.Revision != tile.Revision))
+            int imageRevision = _distant ? tile.Revision : tile.ContentRevision;
+            if (!canUpload && (!resident || slot.Revision != imageRevision))
             {
+                PendingUploadTiles++;
                 _drawRevision = -1;
                 // A deferred refresh must keep the previous image visible. Removing its
                 // page entry made moving traffic punch temporary holes in the far atlas.
                 if (!resident)
                     continue;
             }
-            _pageLayers[page]++;
             if (!resident)
             {
                 int last = _free.Count - 1;
@@ -381,79 +635,32 @@ internal sealed class TrafficMarks : IDisposable
                 _free.RemoveAt(last);
             }
 
-            int x = (slot.Index % SlotsPerSide) * TileResolution;
-            int y = (slot.Index / SlotsPerSide) * TileResolution;
-            if (slot.Revision != tile.Revision && canUpload)
+            if (slot.Revision != imageRevision && canUpload)
             {
-                var pixels = tile.Pixels;
-                int scale = WearHistory.Size / TileResolution;
-                if (scale == 1)
-                {
-                    // The fine atlas uses the same RGBA layout as history. Copy rows
-                    // directly instead of decoding and rebuilding every unchanged channel.
-                    CopyFineTile(pixels, x, y);
-                }
-                else
-                {
-                    for (int i = 0; i < _upload.Length; i++)
-                    {
-                        int sum = 0,
-                            best = 0,
-                            heightAt = 0;
-                        int sx = (i % TileResolution) * scale,
-                            sz = (i / TileResolution) * scale;
-                        for (int dz = 0; dz < scale; dz++)
-                        for (int dx = 0; dx < scale; dx++)
-                        {
-                            int at = ((sz + dz) * WearHistory.Size + sx + dx) * 4;
-                            sum += pixels[at];
-                            if (pixels[at] > best)
-                            {
-                                best = pixels[at];
-                                heightAt = at;
-                            }
-                        }
-                        _upload[i] = new Color32(
-                            (byte)(sum / (scale * scale)),
-                            pixels[heightAt + 1],
-                            pixels[heightAt + 2],
-                            255
-                        );
-                    }
-                    _texture.SetPixels32(x, y, TileResolution, TileResolution, _upload);
-                }
-                slot.Revision = tile.Revision;
+                if (_distant)
+                    tile.ResolveVisibleWeather();
+                UploadImage(tile, ref slot);
                 uploaded = true;
             }
+            else if (!_distant && slot.Burial != tile.BurialTotal)
+                WeatherOnlyReuses++;
 
             _slots[tile] = slot;
-            if (!_distant && ProbeExpected == 0)
-            {
-                var pixels = tile.Pixels;
-                for (int k = 0; k < pixels.Length; k += 4)
-                {
-                    if (pixels[k] > 16)
-                    {
-                        int cell = k / 4;
-                        ProbePoint = new Vector3(
-                            tile.X * WearHistory.TileMeters
-                                + (cell % WearHistory.Size + .5f) * WearHistory.Cell,
-                            (pixels[k + 1] + pixels[k + 2] * 256) * .1f - 1024,
-                            tile.Z * WearHistory.TileMeters
-                                + (cell / WearHistory.Size + .5f) * WearHistory.Cell
-                        );
-                        ProbeExpected = pixels[k] / 255f * candidate.Fade;
-                        break;
-                    }
-                }
-            }
+            // Alpha zero means no page. 1..255 encode exact 254..0 levels of
+            // burial; 255 levels erase every possible 8-bit source pixel.
+            int burial = _distant ? 0 : tile.BurialSince(slot.Burial);
+            if (burial == 255)
+                continue;
+            _pageLayers[page]++;
+            if (!_distant)
+                _probeCandidates.Add(candidate);
 
             int pageIndex = page + layer * PageSide * PageSide;
             var entry = new Color32(
                 (byte)(slot.Index % SlotsPerSide),
                 (byte)(slot.Index / SlotsPerSide),
                 (byte)Mathf.RoundToInt(candidate.Fade * 255),
-                255
+                (byte)(255 - burial)
             );
             var previous = _pagePixels[pageIndex];
             pagesChanged |=
@@ -468,7 +675,11 @@ internal sealed class TrafficMarks : IDisposable
 
         if (uploaded)
         {
-            _texture.Apply(false, false);
+            long copyBefore = _atlas.CopyTicks,
+                transferBefore = _atlas.TransferTicks;
+            _atlas.Flush();
+            TextureCopyTicks += _atlas.CopyTicks - copyBefore;
+            AtlasApplyTicks += _atlas.TransferTicks - transferBefore;
         }
 
         foreach (int occupied in _occupiedPages)
@@ -482,56 +693,60 @@ internal sealed class TrafficMarks : IDisposable
         _occupiedPages.AddRange(_nextOccupiedPages);
         if (pagesChanged)
         {
+            long partStarted = Stopwatch.GetTimestamp();
             _pages.SetPixels32(_pagePixels);
             _pages.Apply(false, false);
+            PageUploadTicks += Stopwatch.GetTimestamp() - partStarted;
         }
         Bind();
         if (!_distant)
             _history.CompressBackground(_selected);
     }
 
-    private unsafe void CopyFineTile(byte[] pixels, int x, int y)
+    private static Vector3 Center(WearTile tile) => new(tile.CenterX, tile.CenterY, tile.CenterZ);
+
+    private void PrepareProbe()
     {
-        int rowBytes = TileResolution * 4;
-        var destination = _texture.GetRawTextureData<byte>();
-        // Cities disables native collection safety checks. Validate both spans before
-        // pinning; the pointer is used only during this synchronous copy.
-        if (
-            pixels.Length != rowBytes * TileResolution
-            || x < 0
-            || y < 0
-            || x + TileResolution > AtlasSize
-            || y + TileResolution > AtlasSize
-            || destination.Length != AtlasSize * AtlasSize * 4
-        )
-            throw new InvalidOperationException("Invalid snow atlas copy bounds.");
-        fixed (byte* source = pixels)
+        ProbeExpected = 0;
+        foreach (var candidate in _probeCandidates)
         {
-            byte* target = (byte*)NativeArrayUnsafeUtility.GetUnsafePtr(destination);
-            UnsafeUtility.MemCpyStride(
-                target + (y * AtlasSize + x) * 4,
-                AtlasSize * 4,
-                source,
-                rowBytes,
-                rowBytes,
-                TileResolution
-            );
+            var tile = candidate.Tile;
+            if (
+                tile.Empty
+                || candidate.Fade == 0
+                || !_slots.TryGetValue(tile, out var slot)
+                || slot.Revision != tile.ContentRevision
+            )
+                continue;
+            var pixels = tile.Pixels;
+            for (int k = 0; k < pixels.Length; k += 4)
+            {
+                if (pixels[k] <= 16)
+                    continue;
+                int cell = k / 4;
+                ProbePoint = new Vector3(
+                    tile.X * WearHistory.TileMeters
+                        + (cell % WearHistory.Size + .5f) * WearHistory.Cell,
+                    (pixels[k + 1] + pixels[k + 2] * 256) * .1f - 1024,
+                    tile.Z * WearHistory.TileMeters
+                        + (cell / WearHistory.Size + .5f) * WearHistory.Cell
+                );
+                ProbeExpected = pixels[k] / 255f * candidate.Fade;
+                return;
+            }
         }
     }
 
-    private static Vector3 Center(WearTile tile) => new(tile.CenterX, tile.CenterY, tile.CenterZ);
-
     public void ProbeGpu(Action<string> report)
     {
-        if (
-            _probePending
-            || _probe == null
-            || ProbeExpected == 0
-            || !SystemInfo.supportsAsyncGPUReadback
-        )
+        if (_probePending || _probe == null || !SystemInfo.supportsAsyncGPUReadback)
         {
             return;
         }
+
+        PrepareProbe();
+        if (ProbeExpected == 0)
+            return;
 
         Vector3 point = ProbePoint;
         float expected = ProbeExpected;
@@ -581,7 +796,7 @@ internal sealed class TrafficMarks : IDisposable
         Shader.SetGlobalVector(_binding + "Area", Vector4.zero);
         Shader.SetGlobalTexture(_binding + "Atlas", Texture2D.blackTexture);
         Shader.SetGlobalTexture(_binding + "Pages", Texture2D.blackTexture);
-        Object.Destroy(_texture);
+        _atlas.Dispose();
         Object.Destroy(_pages);
         _probeResult?.Dispose();
         if (_probe != null)
@@ -590,19 +805,59 @@ internal sealed class TrafficMarks : IDisposable
         }
     }
 
+    private void UploadImage(WearTile tile, ref Slot slot)
+    {
+        byte[] pixels;
+        long started = Stopwatch.GetTimestamp();
+        if (
+            _distant
+            && (
+                _snowing
+                    ? _weatherOverviews.TryGet(tile, out pixels)
+                    : _overviews.TryGet(tile, out pixels)
+            )
+        )
+            OverviewReuses++;
+        else
+        {
+            pixels = tile.Pixels;
+            HistoryReadTicks += Stopwatch.GetTimestamp() - started;
+            if (_distant)
+            {
+                started = Stopwatch.GetTimestamp();
+                pixels = _snowing
+                    ? _weatherOverviews.Build(tile, pixels)
+                    : _overviews.Build(tile, pixels);
+                ReductionTicks += Stopwatch.GetTimestamp() - started;
+                OverviewBuilds++;
+            }
+        }
+        started = Stopwatch.GetTimestamp();
+        _atlas.Queue(pixels, slot.Index);
+        TextureCopyTicks += Stopwatch.GetTimestamp() - started;
+        slot.Revision = _distant ? tile.Revision : tile.ContentRevision;
+        slot.Burial = tile.BurialTotal;
+        slot.PlowSequence = tile.PlowSequence;
+        UploadedTiles++;
+    }
+
     private struct Slot
     {
         public int Index;
         public int Revision;
+        public long Burial;
+        public long PlowSequence;
 
         public Slot(int index, int revision)
         {
             Index = index;
             Revision = revision;
+            Burial = 0;
+            PlowSequence = 0;
         }
     }
 
-    private readonly struct Candidate
+    private readonly struct Candidate : IEquatable<Candidate>
     {
         public readonly WearTile Tile;
         public readonly float Distance;
@@ -614,6 +869,11 @@ internal sealed class TrafficMarks : IDisposable
             Distance = distance;
             Fade = fade;
         }
+
+        public bool Equals(Candidate other) =>
+            ReferenceEquals(Tile, other.Tile)
+            && Distance.Equals(other.Distance)
+            && Fade.Equals(other.Fade);
 
         public static readonly Comparison<Candidate> ByDistance = (a, b) =>
             a.Distance.CompareTo(b.Distance);

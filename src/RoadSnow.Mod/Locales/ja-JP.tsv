@@ -45,3 +45,8 @@ desc.RealisticSnow	足跡やタイヤ跡の周囲に押し出された雪を加�
 label.RealisticSnowWarning	実験的なリアルモード
 desc.RealisticSnowWarning	実験的な機能です。不具合が発生したり、パフォーマンスが低下したりする可能性があります。リアルモードは設定でいつでも無効にできます。
 label.Acknowledge	了解
+
+label.SnowplowClearing	除雪車による除雪
+desc.SnowplowClearing	除雪車がMODの道路の雪を除去し、縁石沿いに雪を積みます。オフにすると新たな除雪を停止します。除雪済みの道路は、新たな降雪で再び雪に覆われます。
+label.WhatsNewTitle	Snowy Roadsの更新内容
+desc.WhatsNewBody	交通量の多い都市でのパフォーマンスを改善しました。除雪車が道路区間全体と交差点を除雪し、歩道や縁石沿いの雪を残すようになりました。新たな降雪で、除雪済みの道路にも徐々に雪が積もります。「雪 → 一般」で除雪をオフにできます。

@@ -9,6 +9,7 @@ public sealed class WearTile
     public readonly int X;
     public readonly int Z;
     public readonly int Layer;
+    internal int HistoryIndex;
     public float CenterX => (X + 0.5f) * WearHistory.TileMeters;
     public float CenterZ => (Z + 0.5f) * WearHistory.TileMeters;
     public float CenterY => Layer * 4 + 2;
@@ -19,6 +20,7 @@ public sealed class WearTile
 
     private byte[]? _pixels;
     private byte[]? _packed;
+    private int _packedRevision = -1;
     private float _lastDepth;
     private float _burialRemainder;
     private int _pendingBurial;
@@ -26,7 +28,87 @@ public sealed class WearTile
 
     public bool Empty = true;
     public int Revision;
+    public long PlowSequence;
+
+    // Weather changes the effective image, not its stamped content. A resident
+    // GPU page can subtract the exact integer burial from its uploaded pixels.
+    private int _weatherRevisions;
+    public int ContentRevision => unchecked(Revision - _weatherRevisions);
+    public long BurialTotal { get; private set; }
+
+    public int BurialSince(long uploadedAt) =>
+        (int)Math.Min(255, Math.Max(0, BurialTotal - uploadedAt));
+
+    private int _maximumWear;
+    private int _maximumContentRevision;
+    private int _overviewBaseRevision = -1;
+    private int _overviewTrackedRevision = -1;
+    private ulong _overview0,
+        _overview1,
+        _overview2,
+        _overview3;
     public bool Resident => _pixels != null;
+
+    internal void PixelChanged(int byteIndex)
+    {
+        bool maximumKnown = _maximumContentRevision == ContentRevision;
+        // Weather and external pixel writers change Revision directly. Their
+        // extent is unknown, so any such gap invalidates the complete overview.
+        if (_overviewTrackedRevision != Revision || byteIndex == 0)
+            _overview0 = _overview1 = _overview2 = _overview3 = ulong.MaxValue;
+        Revision++;
+        if (maximumKnown && _pixels != null)
+        {
+            _maximumWear = Math.Max(_maximumWear, _pixels[byteIndex]);
+            _maximumContentRevision = ContentRevision;
+        }
+        _overviewTrackedRevision = Revision;
+        int pixel = byteIndex >> 2;
+        int block = ((pixel / WearHistory.Size) >> 3) * 16 + ((pixel % WearHistory.Size) >> 3);
+        ulong bit = 1UL << (block & 63);
+        switch (block >> 6)
+        {
+            case 0:
+                _overview0 |= bit;
+                break;
+            case 1:
+                _overview1 |= bit;
+                break;
+            case 2:
+                _overview2 |= bit;
+                break;
+            default:
+                _overview3 |= bit;
+                break;
+        }
+    }
+
+    internal void SpanChanged(int firstByte, int lastByte)
+    {
+        _maximumContentRevision = unchecked(ContentRevision - 1);
+        // Call once per affected 8-pixel overview block, not once per pixel.
+        PixelChanged(firstByte);
+        for (int at = (firstByte / 32 + 1) * 32; at <= lastByte; at += 32)
+            PixelChanged(at);
+    }
+
+    internal bool OverviewBlockChanged(int baseRevision, int block)
+    {
+        if (_overviewBaseRevision != baseRevision || _overviewTrackedRevision != Revision)
+            return true;
+        ulong mask =
+            block < 64 ? _overview0
+            : block < 128 ? _overview1
+            : block < 192 ? _overview2
+            : _overview3;
+        return (mask & (1UL << (block & 63))) != 0;
+    }
+
+    internal void AcknowledgeOverview()
+    {
+        _overviewBaseRevision = _overviewTrackedRevision = Revision;
+        _overview0 = _overview1 = _overview2 = _overview3 = 0;
+    }
 
     public WearTile(int x, int z, int layer, float depth)
     {
@@ -76,8 +158,8 @@ public sealed class WearTile
 
                 if (at != _pixels.Length || inflater.ReadByte() != -1)
                     throw new InvalidDataException("Invalid snow tile pixel data.");
-                _packed = null;
             }
+            RefreshMaximum();
             ApplyBurial();
             return _pixels;
         }
@@ -93,6 +175,14 @@ public sealed class WearTile
 
         ApplyBurial();
 
+        // A far-atlas read can inflate an unchanged tile that the background
+        // compressor visits again. Reuse its lossless bytes until content changes.
+        if (_packed != null && _packedRevision == Revision)
+        {
+            _pixels = null;
+            return;
+        }
+
         using var output = new MemoryStream();
         using (var deflate = new DeflateStream(output, CompressionLevel.Fastest, true))
         {
@@ -100,15 +190,22 @@ public sealed class WearTile
         }
 
         _packed = output.ToArray();
+        _packedRevision = Revision;
         _pixels = null;
     }
 
-    public void Write(BinaryWriter writer)
+    internal int PrepareSave()
     {
         // Materialize deferred weather before serializing the unchanged save format.
         if (_pendingBurial > 0)
             _ = Pixels;
         Compress();
+        return 40 + (_packed?.Length ?? 0);
+    }
+
+    public void Write(BinaryWriter writer)
+    {
+        PrepareSave();
         writer.Write(X);
         writer.Write(Z);
         writer.Write(Layer);
@@ -145,6 +242,7 @@ public sealed class WearTile
             tile._packed = packed;
         }
         tile.Revision = 1;
+        tile._packedRevision = tile.Revision;
         return tile;
     }
 
@@ -187,6 +285,8 @@ public sealed class WearTile
 
         _burialRemainder -= bury;
         _pendingBurial = Math.Min(255, _pendingBurial + bury);
+        BurialTotal += bury;
+        _weatherRevisions++;
         Revision++;
         if (_pendingBurial >= 255)
         {
@@ -203,13 +303,39 @@ public sealed class WearTile
             return;
         // Distant/offscreen history stays compressed. Apply its accumulated
         // snowfall only when a stamp, GPU upload or save actually needs pixels.
-        bool any = false;
+        int maximum = 0;
         for (int i = 0; i < _pixels.Length; i += 4)
         {
             _pixels[i] = (byte)Math.Max(0, _pixels[i] - _pendingBurial);
-            any |= _pixels[i] != 0;
+            maximum = Math.Max(maximum, _pixels[i]);
         }
         _pendingBurial = 0;
-        Empty = !any;
+        Empty = maximum == 0;
+        _maximumWear = maximum;
+        _maximumContentRevision = ContentRevision;
+    }
+
+    private void RefreshMaximum()
+    {
+        _maximumWear = 0;
+        if (_pixels != null)
+            for (int i = 0; i < _pixels.Length; i += 4)
+                _maximumWear = Math.Max(_maximumWear, _pixels[i]);
+        _maximumContentRevision = ContentRevision;
+    }
+
+    // Resolve the same all-zero condition as Pixels, without materializing the
+    // weather. Empty timing affects selection and subsequent snowfall rounding.
+    public void ResolveVisibleWeather()
+    {
+        if (Empty)
+            return;
+        if (_maximumContentRevision != ContentRevision)
+        {
+            _ = Pixels;
+            RefreshMaximum();
+        }
+        if (_maximumWear <= _pendingBurial)
+            Empty = true;
     }
 }

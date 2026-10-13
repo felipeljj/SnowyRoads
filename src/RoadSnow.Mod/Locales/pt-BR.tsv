@@ -45,3 +45,8 @@ desc.RealisticSnow	Acrescenta bordas de neve deslocada nos rastros e montes nas 
 label.RealisticSnowWarning	Modo realista experimental
 desc.RealisticSnowWarning	Experimental: pode apresentar bugs e reduzir o desempenho. Você pode desativar o modo realista a qualquer momento nas configurações.
 label.Acknowledge	Entendi
+
+label.SnowplowClearing	Limpeza por limpa-neves
+desc.SnowplowClearing	Permite que os limpa-neves removam a neve do mod e deixem montes no meio-fio. Desligue para interromper novas limpezas. Os trechos já limpos voltam a acumular neve com novas nevadas.
+label.WhatsNewTitle	Novidades no Snowy Roads
+desc.WhatsNewBody	Melhorias de desempenho em cidades movimentadas. Os limpa-neves agora limpam trechos inteiros e cruzamentos, preservando a neve nas calçadas e meios-fios. Novas nevadas cobrem as ruas limpas aos poucos. Você pode desativar a limpeza por limpa-neves em Neve → Geral.

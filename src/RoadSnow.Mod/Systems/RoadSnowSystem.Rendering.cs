@@ -1,3 +1,4 @@
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.HighDefinition;
@@ -130,8 +131,16 @@ public partial class RoadSnowSystem
         return true;
     }
 
-    public void ReleaseOverlays()
+    public void ReleaseOverlays(bool retainCoverage = true)
     {
+        _coveragePrepared = false;
+        if (retainCoverage && _activePatches.Count > 0)
+            _cachedCoverage.Retain(
+                _activePatches.Where(p => p.Active).Select(p => p.CacheSurface())
+            );
+        _coverageReplacements.Clear();
+        _work.Reset();
+        System.Array.Clear(_workFrames, 0, _workFrames.Length);
         _plowedSnow.Dispose();
         _cachedCoverage.Dispose();
         _snowBanks?.Dispose();
@@ -151,8 +160,22 @@ public partial class RoadSnowSystem
         _patches.Clear();
         _patchesByRoad.Clear();
         _vehicleHistory.Clear();
+        _trafficOwners.Clear();
+        _surfacePlans.Clear();
+        _seenSurfacePlans.Clear();
+        _surfacePlanBuilds = _surfacePlanReuses = 0;
+        _carsExamined = _ownerLookups = _ownerReuses = _projectionQueries = _projectionReuses = 0;
         _singleTrackPrefabs.Clear();
         _plowHistory.Clear();
+        _plowRoute.Clear();
+        _plowRouteOwners.Clear();
+        _plowRouteNodes.Clear();
+        _sectionOwners.Clear();
+        _sectionPlows = 0;
+        _plowTileChanges.Clear();
+        _activePlows = _plowSegments = _plowDiscontinuities = 0;
+        _plowMeters = 0;
+        _plowRoadTriangles = _plowFallbackSegments = 0;
         _trainHistory.Clear();
         _pedestrianHistory.Clear();
         _surfaceCache.Clear();
@@ -179,6 +202,10 @@ public partial class RoadSnowSystem
         _performanceCalls = _performanceDryCalls = 0;
         _performanceTotal = _performanceMaximum = 0;
         _performanceNext = 0;
+        _performanceSamples.Clear();
+        System.Array.Clear(_stageTotals, 0, _stageTotals.Length);
+        System.Array.Clear(_stageMaximums, 0, _stageMaximums.Length);
+        System.Array.Clear(_stageCalls, 0, _stageCalls.Length);
         _readbackPending = false;
         _generation++;
         _snowSnapshotVersion = _snowCursor = _pendingHead = 0;
@@ -186,8 +213,8 @@ public partial class RoadSnowSystem
         _nextColorProbe = 0;
         _nativeAlbedo = _nativeNormal = null;
         _shaderFailed = false;
-        _nextRefresh = _nextTick = _nextReadback = _lastTickTime = 0;
-        _nextTrafficScan = _nextMetrics = 0;
+        _nextRefresh = _nextReadback = 0;
+        _nextMetrics = 0;
         if (_material != null)
         {
             Object.Destroy(_material);

@@ -15,11 +15,13 @@ internal sealed class TerrainMarks : IDisposable
     private readonly Material _material;
     private readonly Mesh _mesh;
     private readonly List<WearTile> _near = new();
-    private readonly List<Vector3> _vertices = new();
-    private readonly List<Vector2> _uv = new();
-    private readonly List<int> _indices = new();
+    private readonly List<WearTile> _nearby = new();
+    private readonly TerrainMeshData _geometry = new();
+    private Vector3 _eye;
     private readonly Plane[] _planes = new Plane[6];
     private float _next;
+    public int GeometryBuilds { get; private set; }
+    public int GeometryReuses { get; private set; }
 
     public TerrainMarks(TerrainSystem terrain, WearHistory history, Material source, Shader shader)
     {
@@ -35,28 +37,39 @@ internal sealed class TerrainMarks : IDisposable
         _mesh.MarkDynamic();
     }
 
-    public void Draw(Camera camera, Material source, float now)
+    public void Draw(
+        Camera camera,
+        Material source,
+        float now,
+        bool prepare = true,
+        bool submit = true
+    )
     {
         if (camera == null)
             return;
-        if (now >= _next)
+        if (prepare && now >= _next)
         {
             _next = now + .5f;
             var terrain = _terrain.GetHeightData();
             if (!terrain.isCreated)
                 return;
             _near.Clear();
-            _vertices.Clear();
-            _uv.Clear();
-            _indices.Clear();
+            _eye = camera.transform.position;
+            _history.QueryTiles(
+                Mathf.FloorToInt((_eye.x - 504) / 8),
+                Mathf.FloorToInt((_eye.z - 504) / 8),
+                Mathf.FloorToInt((_eye.x + 500) / 8),
+                Mathf.FloorToInt((_eye.z + 500) / 8),
+                _nearby
+            );
             GeometryUtility.CalculateFrustumPlanes(camera, _planes);
-            foreach (var tile in _history.Tiles)
+            foreach (var tile in _nearby)
             {
                 if (tile.Empty)
                     continue;
                 Vector3 center = new(tile.CenterX, tile.CenterY, tile.CenterZ);
                 if (
-                    (center - camera.transform.position).sqrMagnitude > 500 * 500
+                    (center - _eye).sqrMagnitude > 500 * 500
                     || !GeometryUtility.TestPlanesAABB(
                         _planes,
                         new Bounds(center, new Vector3(9, 6, 9))
@@ -69,38 +82,38 @@ internal sealed class TerrainMarks : IDisposable
                     continue;
                 _near.Add(tile);
             }
-            _near.Sort((a, b) => Distance(a, camera).CompareTo(Distance(b, camera)));
+            _near.Sort(CompareDistance);
+            _geometry.Vertices.Begin();
             for (int n = 0; n < Math.Min(128, _near.Count); n++)
             {
                 var tile = _near[n];
-                int first = _vertices.Count;
                 for (int z = 0; z <= 8; z++)
                 for (int x = 0; x <= 8; x++)
                 {
                     var p = new Vector3(tile.X * 8 + x, 0, tile.Z * 8 + z);
                     p.y = TerrainUtils.SampleHeight(ref terrain, p) + .035f;
-                    _vertices.Add(p);
-                    _uv.Add(Vector2.zero);
-                    if (x == 8 || z == 8)
-                        continue;
-                    int a = first + z * 9 + x;
-                    _indices.Add(a);
-                    _indices.Add(a + 9);
-                    _indices.Add(a + 1);
-                    _indices.Add(a + 1);
-                    _indices.Add(a + 9);
-                    _indices.Add(a + 10);
+                    _geometry.Vertices.Add(p);
                 }
             }
-            _mesh.Clear();
-            _mesh.SetVertices(_vertices);
-            _mesh.SetUVs(0, _uv);
-            _mesh.SetTriangles(_indices, 0);
-            _mesh.RecalculateNormals();
-            _mesh.RecalculateBounds();
+            if (_geometry.End(out bool topologyChanged))
+            {
+                if (topologyChanged)
+                    _mesh.Clear();
+                _mesh.SetVertices(_geometry.Vertices.Items);
+                if (topologyChanged)
+                {
+                    _mesh.SetUVs(0, _geometry.UV);
+                    _mesh.SetTriangles(_geometry.Indices, 0);
+                }
+                _mesh.RecalculateNormals();
+                _mesh.RecalculateBounds();
+                GeometryBuilds++;
+            }
+            else
+                GeometryReuses++;
         }
         _material.SetColor("_BaseColor", source.GetColor("_BaseColor"));
-        if (_mesh.vertexCount > 0)
+        if (submit && _mesh.vertexCount > 0)
             Graphics.DrawMesh(
                 _mesh,
                 Matrix4x4.identity,
@@ -114,10 +127,10 @@ internal sealed class TerrainMarks : IDisposable
             );
     }
 
-    private static float Distance(WearTile tile, Camera camera) =>
-        (
-            new Vector3(tile.CenterX, tile.CenterY, tile.CenterZ) - camera.transform.position
-        ).sqrMagnitude;
+    private int CompareDistance(WearTile a, WearTile b) => Distance(a).CompareTo(Distance(b));
+
+    private float Distance(WearTile tile) =>
+        (new Vector3(tile.CenterX, tile.CenterY, tile.CenterZ) - _eye).sqrMagnitude;
 
     public void Dispose()
     {

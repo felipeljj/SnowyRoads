@@ -28,6 +28,12 @@ internal static class JunctionSurface
         public readonly List<float3> Vertices = new();
         public readonly List<int> Indices = new();
         public readonly List<int> RowStarts = new();
+
+        // Native undeformed surface heights classify asphalt independently of
+        // the world-space slope. Entries omitted by fallback meshes are unknown.
+        public readonly List<float> RoadHeights = new();
+        public readonly List<PlowSurfaceKind> RoadKinds = new();
+        public readonly List<float2> RoadRanges = new();
         private readonly Dictionary<float3, int> _vertices = new();
 
         public int Vertex(float3 position)
@@ -59,7 +65,7 @@ internal static class JunctionSurface
         bool roundabout = node.m_MiddleRadius > 0;
         // Match the native deformation domains (0/2, 4, 1/3). The central fan
         // has its own vertices; it must not squeeze sidewalks into a quarter width.
-        var strips = new List<(float A, float B, float Height, int Domain)>();
+        var strips = new List<(float A, float B, float Height, int Domain, bool Pedestrian)>();
         foreach (var band in profile ?? new[] { new SurfaceBand(-width / 2, width / 2, 0, false) })
         {
             if (band.Left < middle)
@@ -68,15 +74,16 @@ internal static class JunctionSurface
                         (band.Left + width / 2) / (middle + width / 2),
                         (Math.Min(band.Right, middle) + width / 2) / (middle + width / 2),
                         band.Height,
-                        0
+                        0,
+                        band.Pedestrian
                     )
                 );
         }
         float floor = FloorHeight(profile, middle);
         if (!roundabout)
         {
-            strips.Add((0, 1, floor, 1));
-            strips.Add((0, 1, floor, 2));
+            strips.Add((0, 1, floor, 1, false));
+            strips.Add((0, 1, floor, 2, false));
         }
         foreach (var band in profile ?? new[] { new SurfaceBand(-width / 2, width / 2, 0, false) })
         {
@@ -86,7 +93,8 @@ internal static class JunctionSurface
                         (Math.Max(band.Left, middle) - middle) / (width / 2 - middle),
                         (band.Right - middle) / (width / 2 - middle),
                         band.Height,
-                        3
+                        3,
+                        band.Pedestrian
                     )
                 );
         }
@@ -120,8 +128,16 @@ internal static class JunctionSurface
                 b.y += strip.Height + offset;
                 c.y += strip.Height + offset;
                 d.y += strip.Height + offset;
+                int firstTriangle = mesh.Indices.Count / 3;
                 AddTriangle(mesh, a, b, c, node);
                 AddTriangle(mesh, c, b, d, node);
+                for (int triangle = firstTriangle; triangle < mesh.Indices.Count / 3; triangle++)
+                {
+                    mesh.RoadHeights.Add(strip.Height);
+                    mesh.RoadKinds.Add(
+                        strip.Pedestrian ? PlowSurfaceKind.Excluded : PlowSurfaceKind.Unknown
+                    );
+                }
             }
         }
         mesh.RowStarts.Add(mesh.Indices.Count);

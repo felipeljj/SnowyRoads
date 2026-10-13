@@ -136,6 +136,7 @@ internal sealed class NativeJunctionSurface
         mesh.RowStarts.Add(0);
         for (int i = 0; i < template.Indices.Count; i += 3)
         {
+            int firstTriangle = mesh.Indices.Count / 3;
             float3 a = vertices[template.Indices[i]],
                 b = vertices[template.Indices[i + 1]],
                 c = vertices[template.Indices[i + 2]];
@@ -143,6 +144,26 @@ internal sealed class NativeJunctionSurface
                 JunctionSurface.EmitWall(mesh, a, b, c);
             else
                 JunctionSurface.Emit(mesh, a, b, c);
+            float roadHeight = template.Walls[i / 3]
+                ? float.NaN
+                : math.max(
+                    template.Vertices[template.Indices[i]].Height,
+                    math.max(
+                        template.Vertices[template.Indices[i + 1]].Height,
+                        template.Vertices[template.Indices[i + 2]].Height
+                    )
+                );
+            for (int triangle = firstTriangle; triangle < mesh.Indices.Count / 3; triangle++)
+            {
+                mesh.RoadHeights.Add(roadHeight);
+                mesh.RoadKinds.Add(template.Kinds[i / 3]);
+                float ax = template.Vertices[template.Indices[i]].Lateral;
+                float bx = template.Vertices[template.Indices[i + 1]].Lateral;
+                float cx = template.Vertices[template.Indices[i + 2]].Lateral;
+                mesh.RoadRanges.Add(
+                    new float2(math.min(ax, math.min(bx, cx)), math.max(ax, math.max(bx, cx)))
+                );
+            }
             // Small groups keep point-to-surface queries bounded by local AABBs.
             if ((i + 3) % 96 == 0)
                 mesh.RowStarts.Add(mesh.Indices.Count);
@@ -284,6 +305,7 @@ internal sealed class NativeJunctionSurface
                 }
                 v.U = math.saturate(v.U);
                 v.T = math.saturate(v.T);
+                v.Lateral = p.x;
                 result.Vertices.Add(v);
             }
             for (int i = 0; i + 2 < indices.Length; i += 3)
@@ -306,6 +328,14 @@ internal sealed class NativeJunctionSurface
                 result.Indices.Add(first + (wall && invert != flip ? c : b));
                 result.Indices.Add(first + (wall && invert != flip ? b : c));
                 result.Walls.Add(wall);
+                result.Kinds.Add(
+                    wall
+                        ? PlowSurfaceKind.Excluded
+                        : PlowSurfaceClassification.Classify(
+                            piece.m_PieceFlags,
+                            piece.m_SectionFlags
+                        )
+                );
             }
         }
         return result.Indices.Count > 0 ? result : null;
@@ -316,6 +346,7 @@ internal sealed class NativeJunctionSurface
         public readonly List<Vertex> Vertices = new();
         public readonly List<int> Indices = new();
         public readonly List<bool> Walls = new();
+        public readonly List<PlowSurfaceKind> Kinds = new();
     }
 
     private struct Vertex
@@ -326,7 +357,8 @@ internal sealed class NativeJunctionSurface
             TerrainMode;
         public float U,
             T,
-            Height;
+            Height,
+            Lateral;
         public bool Final;
     }
 }

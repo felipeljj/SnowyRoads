@@ -76,7 +76,7 @@ public partial class RoadSnowSystem
             for (int i = 0; i < count && _vehicleHistory.Count < 512; i++)
             {
                 Entity car = cars[(_scanOffset + i) % cars.Length];
-                if (_vehicleHistory.ContainsKey(car) || IsSnowplow(car))
+                if (_vehicleHistory.ContainsKey(car) || (Mod.Settings.SnowplowClearing && IsSnowplow(car)))
                 {
                     continue;
                 }
@@ -213,17 +213,18 @@ public partial class RoadSnowSystem
         long started = Stopwatch.GetTimestamp();
         for (
             int examined = 0;
-            examined < _trafficKeys.Count && (examined == 0 || Milliseconds(started) < 4);
+            examined < _trafficKeys.Count && (examined == 0 || Milliseconds(started) < .65);
             examined++
         )
         {
+            _carsExamined++;
             if (_carCursor >= _trafficKeys.Count)
             {
                 _carCursor = 0;
             }
 
             Entity car = _trafficKeys[_carCursor++];
-            if (IsSnowplow(car))
+            if (Mod.Settings.SnowplowClearing && IsSnowplow(car))
                 continue;
             if (
                 !EntityManager.Exists(car)
@@ -250,7 +251,7 @@ public partial class RoadSnowSystem
                 transform.m_Position = rendered.m_Position;
                 transform.m_Rotation = rendered.m_Rotation;
             }
-            if (!NearTraffic(transform.m_Position) && !IsWorkingSnowplow(car))
+            if (!NearTraffic(transform.m_Position))
             {
                 _vehicleHistory.Remove(car);
                 continue;
@@ -262,22 +263,6 @@ public partial class RoadSnowSystem
                 float distance = (sample.Left - old.Left).sqrMagnitude;
                 if (distance > 0.01f && distance < 25 * 25)
                 {
-                    if (IsWorkingSnowplow(car))
-                    {
-                        float bladeWidth = Mathf.Clamp(
-                            Vector3.Distance(sample.Left, sample.Right) / .7f + .4f,
-                            2.4f,
-                            4
-                        );
-                        StampCurvedPath(
-                            old,
-                            sample,
-                            (old.Left + old.Right) * .5f,
-                            (sample.Left + sample.Right) * .5f,
-                            bladeWidth,
-                            true
-                        );
-                    }
                     StampCurvedPath(old, sample, old.Left, sample.Left, sample.TireWidth, false);
                     if (!sample.SingleTrack)
                         StampCurvedPath(
@@ -295,14 +280,24 @@ public partial class RoadSnowSystem
         }
     }
 
+    private int _pedestrianCursor;
+
     private void StampPedestrians()
     {
         _terrainHeights = _terrainSystem.GetHeightData();
         _footprintsStamped = 0;
         _trafficKeys.Clear();
         _trafficKeys.AddRange(_pedestrianHistory.Keys);
-        foreach (Entity person in _trafficKeys)
+        long started = Stopwatch.GetTimestamp();
+        for (
+            int examined = 0;
+            examined < _trafficKeys.Count && (examined == 0 || Milliseconds(started) < .4);
+            examined++
+        )
         {
+            if (_pedestrianCursor >= _trafficKeys.Count)
+                _pedestrianCursor = 0;
+            Entity person = _trafficKeys[_pedestrianCursor++];
             if (
                 !EntityManager.Exists(person)
                 || !EntityManager.HasComponent<HumanCurrentLane>(person)
@@ -394,11 +389,18 @@ public partial class RoadSnowSystem
 
     private Entity FindTrafficOwner(Entity lane)
     {
+        if (_trafficOwners.TryGetValue(lane, out var cached))
+        {
+            _ownerReuses++;
+            return cached;
+        }
+        _ownerLookups++;
         Entity current = lane;
         for (int i = 0; i < 8; i++)
         {
             if (_patchesByRoad.ContainsKey(current) || (_facilities?.HasOwner(current) ?? false))
             {
+                _trafficOwners[lane] = current;
                 return current;
             }
 
@@ -410,6 +412,7 @@ public partial class RoadSnowSystem
             current = EntityManager.GetComponentData<Owner>(current).m_Owner;
         }
 
+        _trafficOwners[lane] = Entity.Null;
         return Entity.Null;
     }
 
@@ -450,6 +453,7 @@ public partial class RoadSnowSystem
 
     private bool ProjectMark(Entity owner, Vector3 position, out Vector3 surface)
     {
+        _projectionQueries++;
         surface = default;
         float best = 2.5f;
         bool found = false;
@@ -481,29 +485,6 @@ public partial class RoadSnowSystem
         return found || (_facilities != null && _facilities.Project(owner, position, out surface));
     }
 
-    private bool IsWorkingSnowplow(Entity car)
-    {
-        if (!IsSnowplow(car))
-            return false;
-
-        var state = EntityManager.GetComponentData<MaintenanceVehicle>(car).m_State;
-        if (
-            (
-                (state & MaintenanceVehicleFlags.Working) == 0
-                && (
-                    !EntityManager.HasComponent<Car>(car)
-                    || (EntityManager.GetComponentData<Car>(car).m_Flags & CarFlags.Working) == 0
-                )
-            )
-            || (state & MaintenanceVehicleFlags.Disabled) != 0
-        )
-        {
-            return false;
-        }
-
-        return true;
-    }
-
     private bool IsSnowplow(Entity car)
     {
         if (
@@ -525,12 +506,19 @@ public partial class RoadSnowSystem
         Vector3 from,
         Vector3 to,
         float width,
-        bool plow
+        bool plow,
+        Entity oldLane = default,
+        Entity currentLane = default,
+        float maximumDistance = 25
     )
     {
         float distance = Vector3.Distance(from, to);
-        if (distance < .01f || distance > 25)
+        if (distance < (plow ? PlowSweep.MinimumDistance : .01f) || distance > maximumDistance)
+        {
+            if (plow && distance > maximumDistance)
+                _plowDiscontinuities++;
             return;
+        }
         // Parking can rotate/reposition a vehicle between samples; do not join that teleport.
         if (distance > 2 && Vector3.Dot(old.Forward, sample.Forward) < -.5f)
             return;
@@ -544,8 +532,20 @@ public partial class RoadSnowSystem
         // Hermite-equivalent Bezier: vehicle headings supply the tangents, not a guessed lane.
         Vector3 c1 = from + start * (distance / 3);
         Vector3 c2 = to - end * (distance / 3);
-        int steps = Math.Min(96, Math.Max(1, Mathf.CeilToInt(distance / .45f)));
+        int steps = plow
+            ? PlowSweep.Steps(from, c1, c2, to)
+            : Math.Min(96, Math.Max(1, Mathf.CeilToInt(distance / .45f)));
+        if (plow)
+        {
+            PreparePlowRoute(old.Road, sample.Road, UnityEngine.Time.realtimeSinceStartup);
+            var hull = new Bounds(from, Vector3.zero);
+            hull.Encapsulate(c1);
+            hull.Encapsulate(c2);
+            hull.Encapsulate(to);
+            _plowRoute.Filter(hull);
+        }
         Vector3 a = from;
+        EndpointProjection endpoint = default;
         for (int i = 1; i <= steps; i++)
         {
             float t = i / (float)steps,
@@ -553,33 +553,68 @@ public partial class RoadSnowSystem
             Vector3 b = u * u * u * from + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * to;
             Vector3 middle = (a + b) * .5f;
             Entity owner = sample.Road;
+            if (plow)
+            {
+                if (
+                    !ProjectPlowSurface(middle, out var plowSurface)
+                    && !ProjectPlowLane(currentLane, middle, width, out plowSurface)
+                    && !ProjectPlowLane(oldLane, middle, width, out plowSurface)
+                )
+                {
+                    a = b;
+                    continue;
+                }
+                Vector3 plowA = ProjectPlowSurface(a, out var startPoint)
+                    ? startPoint
+                    : new Vector3(a.x, plowSurface.y, a.z);
+                Vector3 plowB = ProjectPlowSurface(b, out var endPoint)
+                    ? endPoint
+                    : new Vector3(b.x, plowSurface.y, b.z);
+                DepositPlowedSnow(owner, plowA, plowB, width);
+                if (!PlowEntireRoad(plowA, plowB))
+                {
+                    _plowFallbackSegments++;
+                    _trafficMarks.Add(
+                        plowA,
+                        plowB,
+                        false,
+                        _isPreviewActive ? 15 : SampleSnow(plowSurface),
+                        widthMeters: width,
+                        plow: true
+                    );
+                }
+                _carsStamped++;
+                _plowSegments++;
+                _plowMeters += Vector3.Distance(plowA, plowB);
+                a = b;
+                continue;
+            }
             if (!ProjectMark(owner, middle, out var surface))
             {
                 owner = old.Road;
                 if (
                     !ProjectMark(owner, middle, out surface)
-                    && (plow || !TryTerrainSurface(middle, out surface))
+                    && !TryTerrainSurface(middle, out surface)
                 )
                 {
                     a = b;
                     continue;
                 }
             }
-            Vector3 pa = ProjectMark(owner, a, out var projectedA)
-                ? projectedA
-                : new Vector3(a.x, surface.y, a.z);
-            Vector3 pb = ProjectMark(owner, b, out var projectedB)
-                ? projectedB
-                : new Vector3(b.x, surface.y, b.z);
-            if (plow)
-                DepositPlowedSnow(owner, pa, pb, width);
+            if (endpoint.TryGet(owner, a, out var projectedA, out bool foundA))
+                _projectionReuses++;
+            else
+                foundA = ProjectMark(owner, a, out projectedA);
+            Vector3 pa = foundA ? projectedA : new Vector3(a.x, surface.y, a.z);
+            bool foundB = ProjectMark(owner, b, out var projectedB);
+            endpoint.Store(owner, b, projectedB, foundB);
+            Vector3 pb = foundB ? projectedB : new Vector3(b.x, surface.y, b.z);
             _trafficMarks.Add(
                 pa,
                 pb,
                 false,
                 _isPreviewActive ? 15 : SampleSnow(surface),
-                widthMeters: width,
-                plow: plow
+                widthMeters: width
             );
             _carsStamped++;
             a = b;

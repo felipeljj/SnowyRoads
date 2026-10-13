@@ -15,17 +15,31 @@ internal static class WearView
         private readonly bool _orthographic;
 
         public Snapshot(Camera camera)
-        {
-            Matrix = camera.projectionMatrix * camera.worldToCameraMatrix;
-            Eye = camera.transform.position;
-            _forward = camera.transform.forward;
-            _orthographic = camera.orthographic;
-            _pixelScale =
+            : this(
+                camera.projectionMatrix * camera.worldToCameraMatrix,
+                camera.transform.position,
+                camera.transform.forward,
+                camera.orthographic,
                 (
-                    _orthographic
+                    camera.orthographic
                         ? camera.orthographicSize * 2
                         : 2 * Mathf.Tan(camera.fieldOfView * Mathf.Deg2Rad * .5f)
-                ) / Mathf.Max(1, camera.pixelHeight);
+                ) / Mathf.Max(1, camera.pixelHeight)
+            ) { }
+
+        public Snapshot(
+            Matrix4x4 matrix,
+            Vector3 eye,
+            Vector3 forward,
+            bool orthographic,
+            float pixelScale
+        )
+        {
+            Matrix = matrix;
+            Eye = eye;
+            _forward = forward;
+            _orthographic = orthographic;
+            _pixelScale = pixelScale;
             _horizontalWeight =
                 1 - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(.15f, .55f, Mathf.Abs(_forward.y)));
         }
@@ -46,6 +60,14 @@ internal static class WearView
             (screen.x - .5f) * (screen.x - .5f)
             + (screen.y - .5f) * (screen.y - .5f)
             + _horizontalWeight * Mathf.Sqrt(distanceSquared) * .015f;
+
+        public bool Equals(Snapshot other) =>
+            Matrix.Equals(other.Matrix)
+            && Eye.Equals(other.Eye)
+            && _forward.Equals(other._forward)
+            && _pixelScale.Equals(other._pixelScale)
+            && _horizontalWeight.Equals(other._horizontalWeight)
+            && _orthographic == other._orthographic;
     }
 
     public static Vector4 DetailLaneArea(Camera camera, Vector3 pivot)

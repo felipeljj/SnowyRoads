@@ -45,3 +45,8 @@ desc.RealisticSnow	Adds displaced snow rims around impressions and banks between
 label.RealisticSnowWarning	Experimental realistic mode
 desc.RealisticSnowWarning	Experimental: may contain bugs and reduce performance. You can turn realistic mode off at any time in the settings.
 label.Acknowledge	Understood
+
+label.SnowplowClearing	Snowplow clearing
+desc.SnowplowClearing	Lets snowplows clear the mod's road snow and leave piles along the curb. Turn off to stop new clearing. Previously cleared sections recover with snowfall.
+label.WhatsNewTitle	What's new in Snowy Roads
+desc.WhatsNewBody	Performance improvements for busy cities. Snowplows now clear entire road sections and junctions while preserving snow on sidewalks and curbs. Fresh snowfall gradually covers cleared roads again. You can turn snowplow clearing off in Snow → General.

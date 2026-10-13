@@ -45,3 +45,8 @@ desc.RealisticSnow	Ajoute des bourrelets de neige autour des traces et des accum
 label.RealisticSnowWarning	Mode réaliste expérimental
 desc.RealisticSnowWarning	Expérimental : peut présenter des bugs et réduire les performances. Vous pouvez désactiver le mode réaliste à tout moment dans les paramètres.
 label.Acknowledge	Compris
+
+label.SnowplowClearing	Déneigement par chasse-neige
+desc.SnowplowClearing	Permet aux chasse-neige de retirer la neige du mod et de former des tas le long des bordures. Désactivez cette option pour arrêter les nouveaux déneigements. Les tronçons déjà dégagés se recouvrent lors de nouvelles chutes de neige.
+label.WhatsNewTitle	Nouveautés de Snowy Roads
+desc.WhatsNewBody	Améliorations des performances dans les villes animées. Les chasse-neige dégagent désormais des tronçons entiers et les carrefours, en préservant la neige sur les trottoirs et les bordures. Les nouvelles chutes de neige recouvrent progressivement les routes. Le déneigement peut être désactivé dans Neige → Général.

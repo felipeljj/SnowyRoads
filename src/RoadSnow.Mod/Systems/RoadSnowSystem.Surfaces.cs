@@ -15,11 +15,120 @@ namespace RoadSnow.Mod;
 
 public partial class RoadSnowSystem
 {
+    private readonly Dictionary<Entity, SurfacePlan> _surfacePlans = new();
+    private readonly HashSet<Entity> _seenSurfacePlans = new();
+    private readonly List<Vector3> _coverageReplacements = new();
+    private readonly HashSet<Vector3> _coverageCenters = new();
+    private long _surfacePlanBuilds,
+        _surfacePlanReuses;
+
+    private sealed class SurfacePlan
+    {
+        public SurfacePlanInput Input;
+        public float CheckAfter;
+        public readonly List<PatchRequest> Requests = new();
+        public readonly HashSet<PatchKey> Keys = new();
+    }
+
+    private SurfacePlanInput CaptureSurfaceInput(
+        Entity entity,
+        EdgeGeometry geometry,
+        Composition composition,
+        NetCompositionData data
+    )
+    {
+        var input = new SurfacePlanInput
+        {
+            Geometry = geometry,
+            Edge = EntityManager.GetComponentData<Edge>(entity),
+            Composition = composition,
+            EdgeData = data,
+        };
+        if (EntityManager.HasComponent<StartNodeGeometry>(entity))
+        {
+            input.Start = EntityManager.GetComponentData<StartNodeGeometry>(entity);
+            input.Flags |= 1;
+        }
+        if (EntityManager.HasComponent<EndNodeGeometry>(entity))
+        {
+            input.End = EntityManager.GetComponentData<EndNodeGeometry>(entity);
+            input.Flags |= 2;
+        }
+        if (SupportsSnowComposition(composition.m_StartNode))
+        {
+            input.StartData = EntityManager.GetComponentData<NetCompositionData>(
+                composition.m_StartNode
+            );
+            input.Flags |= 4;
+            if (_nativeJunctions.IsReady(EntityManager, composition.m_StartNode))
+                input.Flags |= 16;
+        }
+        if (SupportsSnowComposition(composition.m_EndNode))
+        {
+            input.EndData = EntityManager.GetComponentData<NetCompositionData>(
+                composition.m_EndNode
+            );
+            input.Flags |= 8;
+            if (_nativeJunctions.IsReady(EntityManager, composition.m_EndNode))
+                input.Flags |= 32;
+        }
+        return input;
+    }
+
+    private void AcceptSurfacePlan(Entity edge, SurfacePlan plan, float now)
+    {
+        _visibleNetworks++;
+        _desiredByEdge[edge] = plan.Keys;
+        foreach (var request in plan.Requests)
+        {
+            var section = request.Section;
+            float middle = Mathf.Clamp(
+                section.Data.m_MiddleOffset / section.Data.m_Width + .5f,
+                .01f,
+                .99f
+            );
+            float along = Mathf.Lerp(
+                request.Chunk / (float)request.Chunks,
+                (request.Chunk + 1f) / request.Chunks,
+                .5f
+            );
+            Vector3 center = SurfaceGeometry.Position(
+                section.Segment,
+                section.Node,
+                middle,
+                .5f,
+                along
+            );
+            center.y += Mathf.Clamp(Mod.Settings.SurfaceOffsetCm, 1, 12) / 100f + .03f;
+            foreach (var way in section.Surfaces)
+                if (way.Position.x - way.Width / 2 <= 0 && way.Position.x + way.Width / 2 >= 0)
+                {
+                    center.y += way.Position.y;
+                    break;
+                }
+            _coverageCenters.Add(CachedCoverage.Key(center));
+            _desired.Add(request.Key);
+            if (_patches.TryGetValue(request.Key, out var patch))
+            {
+                patch.Active = true;
+                patch.LastSeen = now;
+            }
+            else if (_queued.Add(request.Key))
+                _pending.Add(request);
+            if (request.Detailed)
+                _detailedParts++;
+            if (request.Section.Node.HasValue)
+                _nodeParts++;
+        }
+        ReconcileEdge(edge, now);
+    }
+
     // network compositions provide the surface shape. discovery and mesh creation have
     //separate budgets so rebuilding roads does not force all patches into one frame
     private IEnumerable<bool> RefreshPatches(Camera camera, float now)
     {
         var candidates = new List<(Entity Edge, EdgeGeometry Geometry, float Distance)>();
+        Vector3 position = camera.transform.position;
         using (var entities = _roadQuery.ToEntityArray(Allocator.Temp))
         {
             using (var geometries = _roadQuery.ToComponentDataArray<EdgeGeometry>(Allocator.Temp))
@@ -27,7 +136,6 @@ public partial class RoadSnowSystem
                 for (int i = 0; i < entities.Length; i++)
                 {
                     var bounds = geometries[i].m_Bounds;
-                    Vector3 position = camera.transform.position;
                     float distance = CoveragePolicy.HorizontalDistanceSquared(
                         position.x,
                         position.z,
@@ -43,12 +151,14 @@ public partial class RoadSnowSystem
 
         candidates.Sort((a, b) => a.Distance.CompareTo(b.Distance));
         _desired.Clear();
+        _coverageCenters.Clear();
         _desiredByEdge.Clear();
         _pending.Clear();
         _queued.Clear();
         _pendingHead = 0;
         _visibleNetworks = _detailedParts = _nodeParts = 0;
         _nativeJunctions.BeginRefresh();
+        _seenSurfacePlans.Clear();
         foreach (var candidate in candidates)
         {
             yield return true;
@@ -72,6 +182,25 @@ public partial class RoadSnowSystem
                 continue;
             }
 
+            _seenSurfacePlans.Add(candidate.Edge);
+            var input = CaptureSurfaceInput(candidate.Edge, candidate.Geometry, composition, data);
+            if (
+                _surfacePlans.TryGetValue(candidate.Edge, out var plan)
+                && now < plan.CheckAfter
+                && plan.Input.SameAs(input)
+            )
+            {
+                AcceptSurfacePlan(candidate.Edge, plan, now);
+                _surfacePlanReuses++;
+                continue;
+            }
+            plan = new SurfacePlan
+            {
+                Input = input,
+                CheckAfter = now + 30 + (candidate.Edge.Index & 31),
+            };
+            _surfacePlanBuilds++;
+
             var sections = new List<SurfaceSection>
             {
                 new(
@@ -91,7 +220,7 @@ public partial class RoadSnowSystem
                     candidate.Edge
                 ),
             };
-            var edge = EntityManager.GetComponentData<Edge>(candidate.Edge);
+            var edge = input.Edge;
             AddNodeSection(
                 sections,
                 candidate.Edge,
@@ -122,13 +251,11 @@ public partial class RoadSnowSystem
 
             if (detailCost == 0)
             {
+                _surfacePlans.Remove(candidate.Edge);
                 continue;
             }
 
             bool detailed = false;
-            _visibleNetworks++;
-            var roadKeys = new HashSet<PatchKey>();
-            _desiredByEdge[candidate.Edge] = roadKeys;
             foreach (var section in sections)
             {
                 if (section.Surfaces.Count == 0)
@@ -202,44 +329,20 @@ public partial class RoadSnowSystem
                         chunk,
                         unchecked(signature * 31 + (detailed ? 1 : 0))
                     );
-                    _desired.Add(key);
-                    roadKeys.Add(key);
-                    if (!_patches.TryGetValue(key, out var patch))
-                    {
-                        if (_queued.Add(key))
-                        {
-                            _pending.Add(
-                                new PatchRequest(
-                                    key,
-                                    candidate.Edge,
-                                    section,
-                                    chunk,
-                                    chunks,
-                                    detailed
-                                )
-                            );
-                        }
-                    }
-                    else
-                    {
-                        patch.Active = true;
-                        patch.LastSeen = now;
-                    }
-
-                    if (detailed)
-                    {
-                        _detailedParts++;
-                    }
-
-                    if (section.Node.HasValue)
-                    {
-                        _nodeParts++;
-                    }
+                    plan.Keys.Add(key);
+                    plan.Requests.Add(
+                        new PatchRequest(key, candidate.Edge, section, chunk, chunks, detailed)
+                    );
                 }
             }
 
-            ReconcileEdge(candidate.Edge, now);
+            _surfacePlans[candidate.Edge] = plan;
+            AcceptSurfacePlan(candidate.Edge, plan, now);
         }
+
+        foreach (var entity in _surfacePlans.Keys.ToArray())
+            if (!_seenSurfacePlans.Contains(entity))
+                _surfacePlans.Remove(entity);
 
         foreach (var entity in _keysByEdge.Keys.ToArray())
         {
@@ -249,6 +352,7 @@ public partial class RoadSnowSystem
             }
         }
 
+        _cachedCoverage.RetireUnseen(_coverageCenters);
         _activePatches.RemoveAll(p => !p.Active);
         foreach (var owner in _patchesByRoad.Keys.ToArray())
         {
@@ -258,21 +362,20 @@ public partial class RoadSnowSystem
                 _patchesByRoad.Remove(owner);
             }
         }
-
-        if (_surfaceCache.Count > 4096)
-        {
-            _surfaceCache.Clear();
-        }
     }
 
     private readonly NativeJunctionSurface _nativeJunctions = new();
 
-    private void CreatePending(float now)
+    private void CreatePending(float now, bool loading = false)
     {
         long started = Stopwatch.GetTimestamp();
         int count = 0;
         var terrain = _pendingHead < _pending.Count ? _terrainSystem.GetHeightData() : default;
-        while (_pendingHead < _pending.Count && count < 8 && Milliseconds(started) < 2)
+        while (
+            _pendingHead < _pending.Count
+            && count < (loading ? 128 : 1)
+            && (loading || Milliseconds(started) < .6)
+        )
         {
             var request = _pending[_pendingHead++];
             _queued.Remove(request.Key);
@@ -281,84 +384,98 @@ public partial class RoadSnowSystem
                 continue;
             }
 
-            var section = request.Section;
-            var profile = section
-                .Surfaces.Select(w => new SurfaceBand(
-                    w.Position.x - w.Width / 2,
-                    w.Position.x + w.Width / 2,
-                    w.Position.y,
-                    w.Pedestrian
-                ))
-                .ToArray();
-            float surfaceLift = Mathf.Clamp(Mod.Settings.SurfaceOffsetCm, 1, 12) / 100f + .03f;
-            var nativeJunction = section.Node.HasValue
-                ? _nativeJunctions.Build(
-                    EntityManager,
-                    section.Composition,
-                    section.Data,
-                    section.Node.Value,
-                    surfaceLift,
-                    terrain
-                )
-                : null;
-            var patch = new RoadPatch(
-                section.Segment,
-                request.Chunk / (float)request.Chunks,
-                (request.Chunk + 1f) / request.Chunks,
-                0,
-                1,
-                section.Data.m_Width,
-                section.Length / request.Chunks,
-                surfaceLift,
-                _atlas,
-                unchecked(1984 + request.Edge.Index * 37),
-                request.Chunk * section.Length / request.Chunks,
-                section.Pedestrian,
-                request.Detailed,
-                section.Node,
-                section.Data.m_MiddleOffset / section.Data.m_Width + 0.5f,
-                profile,
-                section.Data.m_SyncVertexOffsetsLeft,
-                section.Data.m_SyncVertexOffsetsRight,
-                nativeJunction
-            );
-            patch.LastSeen = now;
-            patch.LastSnowTime = now;
-            patch.LastSimulationFrame = _simulationSystem.frameIndex;
-            _laneWearMask.Register(EntityManager, section.Owner, _simulationSystem.frameIndex);
-            if (_isPreviewActive || _snowSnapshot != null)
-            {
-                patch.FollowSnow(
-                    _isPreviewActive
-                        ? 15
-                        : patch.Observation.Observe(SampleSnow(patch.Center), _snowSnapshotVersion),
-                    0
-                );
-            }
-
-            if (_residualHistory.TryGetValue(patch.Center, out var retained))
-                patch.RestoreResidual(retained);
-            patch.Upload(true);
-            _cachedCoverage.Hide(patch.Center);
-            _patches.Add(request.Key, patch);
-            _activePatches.Add(patch);
-            if (!_keysByEdge.TryGetValue(request.Edge, out var keys))
-            {
-                _keysByEdge.Add(request.Edge, keys = new List<PatchKey>());
-            }
-
-            keys.Add(request.Key);
-            AddTrafficPatch(request.Edge, patch);
-            if (section.Owner != request.Edge)
-            {
-                AddTrafficPatch(section.Owner, patch);
-            }
-
-            ReconcileEdge(request.Edge, now);
+            CreatePatch(request, now, terrain);
             count++;
         }
 
         _lastCreateMs = Milliseconds(started);
+    }
+
+    private void CreatePatch(PatchRequest request, float now, TerrainHeightData terrain)
+    {
+        var section = request.Section;
+        var profile = section
+            .Surfaces.Select(w => new SurfaceBand(
+                w.Position.x - w.Width / 2,
+                w.Position.x + w.Width / 2,
+                w.Position.y,
+                w.Pedestrian
+            ))
+            .ToArray();
+        float surfaceLift = Mathf.Clamp(Mod.Settings.SurfaceOffsetCm, 1, 12) / 100f + .03f;
+        var nativeJunction = section.Node.HasValue
+            ? _nativeJunctions.Build(
+                EntityManager,
+                section.Composition,
+                section.Data,
+                section.Node.Value,
+                surfaceLift,
+                terrain
+            )
+            : null;
+        var patch = new RoadPatch(
+            section.Segment,
+            request.Chunk / (float)request.Chunks,
+            (request.Chunk + 1f) / request.Chunks,
+            0,
+            1,
+            section.Data.m_Width,
+            section.Length / request.Chunks,
+            surfaceLift,
+            _atlas,
+            unchecked(1984 + request.Edge.Index * 37),
+            request.Chunk * section.Length / request.Chunks,
+            section.Pedestrian,
+            request.Detailed,
+            section.Node,
+            section.Data.m_MiddleOffset / section.Data.m_Width + 0.5f,
+            profile,
+            section.Data.m_SyncVertexOffsetsLeft,
+            section.Data.m_SyncVertexOffsetsRight,
+            nativeJunction
+        );
+        patch.LastSeen = now;
+        patch.LastSnowTime = now;
+        patch.LastSimulationFrame = _simulationSystem.frameIndex;
+        _laneWearMask.Register(EntityManager, section.Owner, _simulationSystem.frameIndex);
+        if (_isPreviewActive || _snowSnapshot != null)
+        {
+            patch.FollowSnow(
+                _isPreviewActive
+                    ? 15
+                    : patch.Observation.Observe(SampleSnow(patch.Center), _snowSnapshotVersion),
+                0
+            );
+        }
+
+        if (_residualHistory.TryGetValue(patch.Center, out var retained))
+            patch.RestoreResidual(retained);
+        if (
+            _completedSectionOwners.TryGetValue(section.Owner, out double plowedAt)
+            || _sectionPlowHistory.TryGetValue(CachedCoverage.Key(patch.Center), out plowedAt)
+            || _cachedCoverage.TrySectionPlow(patch.Center, out plowedAt)
+        )
+        {
+            patch.RestoreSectionPlow(plowedAt, _snowfall.TotalMm);
+            _sectionPlowHistory[CachedCoverage.Key(patch.Center)] = plowedAt;
+        }
+        patch.Upload(true);
+        _coverageReplacements.Add(patch.Center);
+        _patches.Add(request.Key, patch);
+        _activePatches.Add(patch);
+        if (!_keysByEdge.TryGetValue(request.Edge, out var keys))
+        {
+            _keysByEdge.Add(request.Edge, keys = new List<PatchKey>());
+        }
+
+        keys.Add(request.Key);
+        AddTrafficPatch(request.Edge, patch);
+        if (section.Owner != request.Edge)
+        {
+            AddTrafficPatch(section.Owner, patch);
+        }
+
+        ReconcileEdge(request.Edge, now);
     }
 
     private void ReconcileEdge(Entity edge, float now)
@@ -410,7 +527,7 @@ public partial class RoadSnowSystem
 
         long started = Stopwatch.GetTimestamp();
         int count = 0;
-        while (count < _activePatches.Count && count < 256 && Milliseconds(started) < 1.5)
+        while (count < _activePatches.Count && count < 256 && Milliseconds(started) < .4)
         {
             if (_snowCursor >= _activePatches.Count)
             {
@@ -445,6 +562,7 @@ public partial class RoadSnowSystem
             }
 
             _residualHistory[patch.Center] = patch.ResidualDepth;
+            patch.ObservePlowSnowfall(_snowfall.TotalMm);
             patch.LastSnowTime = now;
             if (patch.Upload(true))
             {
@@ -715,7 +833,7 @@ public partial class RoadSnowSystem
                     )
             )
             .ToList();
-        _surfaceCache[cacheKey] = result;
+        _surfaceCache.Set(cacheKey, result);
         return result;
     }
 

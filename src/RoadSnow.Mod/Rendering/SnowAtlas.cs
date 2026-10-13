@@ -21,19 +21,25 @@ internal sealed class SnowAtlas : IDisposable
             page.SetVisible(visible);
     }
 
-    public Slot Allocate(bool detailed, Vector3[] vertices, Vector2[] uv, int[] indices)
+    public Slot Allocate(
+        bool detailed,
+        Vector3[] vertices,
+        Vector2[] uv,
+        int[] indices,
+        byte[] roadMask = null
+    )
     {
         foreach (var page in _pages)
         {
             if (page.Detailed == detailed && page.HasSpace)
             {
-                return page.Add(vertices, uv, indices);
+                return page.Add(vertices, uv, indices, roadMask);
             }
         }
 
         var created = new Page(_material, detailed);
         _pages.Add(created);
-        return created.Add(vertices, uv, indices);
+        return created.Add(vertices, uv, indices, roadMask);
     }
 
     public void Flush(bool uploadTextures = true)
@@ -65,6 +71,7 @@ internal sealed class SnowAtlas : IDisposable
         public readonly Vector3[] Vertices;
         public readonly Vector2[] UV;
         public readonly int[] Indices;
+        public readonly byte[] RoadMask;
         private Color32[] _pixels;
         public int Columns { get; private set; }
         public int Rows { get; private set; }
@@ -80,13 +87,21 @@ internal sealed class SnowAtlas : IDisposable
                 (Offset.y + 1.5f + uv.y * (Rows - 1)) / _page.Size
             );
 
-        public Slot(Page page, int index, Vector3[] vertices, Vector2[] uv, int[] indices)
+        public Slot(
+            Page page,
+            int index,
+            Vector3[] vertices,
+            Vector2[] uv,
+            int[] indices,
+            byte[] roadMask
+        )
         {
             _page = page;
             Index = index;
             Vertices = vertices;
             UV = uv;
             Indices = indices;
+            RoadMask = roadMask;
         }
 
         public void Write(Color32[] pixels, int columns, int rows)
@@ -185,11 +200,11 @@ internal sealed class SnowAtlas : IDisposable
             renderer.SetPropertyBlock(properties);
         }
 
-        public Slot Add(Vector3[] vertices, Vector2[] uv, int[] indices)
+        public Slot Add(Vector3[] vertices, Vector2[] uv, int[] indices, byte[] roadMask)
         {
             int index = _free[_free.Count - 1];
             _free.RemoveAt(_free.Count - 1);
-            var slot = new Slot(this, index, vertices, uv, indices);
+            var slot = new Slot(this, index, vertices, uv, indices, roadMask);
             _slots.Add(slot.Index, slot);
             _geometryDirty = true;
             return slot;
@@ -229,6 +244,7 @@ internal sealed class SnowAtlas : IDisposable
 
                 var vertices = new Vector3[vertexCount];
                 var uv = new Vector2[vertexCount];
+                var plowUv = new Vector2[vertexCount];
                 var indices = new int[indexCount];
                 int vertex = 0;
                 int index = 0;
@@ -238,6 +254,10 @@ internal sealed class SnowAtlas : IDisposable
                     Vector2 offset = slot.Offset;
                     for (int i = 0; i < slot.UV.Length; i++)
                     {
+                        plowUv[vertex + i] = new Vector2(
+                            slot.RoadMask != null ? slot.RoadMask[i] / 255f : 0,
+                            0
+                        );
                         uv[vertex + i] = new Vector2(
                             (offset.x + 1.5f + slot.UV[i].x * (slot.Columns - 1)) / Size,
                             (offset.y + 1.5f + slot.UV[i].y * (slot.Rows - 1)) / Size
@@ -255,6 +275,7 @@ internal sealed class SnowAtlas : IDisposable
                 _mesh.Clear();
                 _mesh.vertices = vertices;
                 _mesh.uv = uv;
+                _mesh.uv3 = plowUv;
                 _mesh.triangles = indices;
                 _mesh.RecalculateNormals();
                 _mesh.RecalculateBounds();

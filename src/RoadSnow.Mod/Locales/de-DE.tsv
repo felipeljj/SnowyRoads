@@ -45,3 +45,8 @@ desc.RealisticSnow	Ergänzt verdrängte Schneeränder an Spuren und Schnee zwisc
 label.RealisticSnowWarning	Experimenteller realistischer Modus
 desc.RealisticSnowWarning	Experimentell: Kann Fehler enthalten und die Leistung beeinträchtigen. Der realistische Modus kann jederzeit in den Einstellungen deaktiviert werden.
 label.Acknowledge	Verstanden
+
+label.SnowplowClearing	Schneeräumung
+desc.SnowplowClearing	Schneepflüge räumen den Schnee des Mods und hinterlassen Schneehaufen am Straßenrand. Deaktivieren, um weitere Räumungen zu stoppen. Bereits geräumte Abschnitte werden bei neuem Schneefall wieder bedeckt.
+label.WhatsNewTitle	Neu in Snowy Roads
+desc.WhatsNewBody	Verbesserte Leistung in belebten Städten. Schneepflüge räumen jetzt ganze Straßenabschnitte und Kreuzungen; Schnee auf Gehwegen und an Bordsteinen bleibt erhalten. Neuer Schneefall bedeckt geräumte Straßen nach und nach. Die Schneeräumung lässt sich unter Schnee → Allgemein deaktivieren.

@@ -45,3 +45,8 @@ desc.RealisticSnow	在脚印和轮胎痕迹周围添加被挤出的雪，并在�
 label.RealisticSnowWarning	实验性真实模式
 desc.RealisticSnowWarning	实验性功能：可能出现错误并降低性能。您可以随时在设置中关闭真实模式。
 label.Acknowledge	知道了
+
+label.SnowplowClearing	扫雪车清雪
+desc.SnowplowClearing	允许扫雪车清除模组的道路积雪，并在路缘堆积雪。关闭后将停止新的清雪作业。已清理的路段会在再次降雪时重新积雪。
+label.WhatsNewTitle	Snowy Roads 更新内容
+desc.WhatsNewBody	改善了繁忙城市中的性能。扫雪车现在会清理整段道路和交叉路口，同时保留人行道与路缘的积雪。新的降雪会逐渐覆盖已清理的道路。可在“积雪 → 常规”中关闭扫雪车清雪。

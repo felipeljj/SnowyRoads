@@ -34,6 +34,12 @@ public sealed class Setting : ModSetting
     [SettingsUISection("Main", "General")]
     public bool HideRoadMarkings { get; set; } = true;
 
+    [SettingsUISection("Main", "General")]
+    public bool SnowplowClearing { get; set; } = true;
+
+    [SettingsUIHidden, SettingsUIForceSave]
+    public string SeenWhatsNewRevision { get; set; } = "";
+
     [SettingsUISlider(min = 0, max = 100, step = 10)]
     [SettingsUISection("Main", "Weather")]
     public int TrafficInfluence { get; set; } = 70;
@@ -143,6 +149,8 @@ public sealed class Setting : ModSetting
     public override void SetDefaults()
     {
         Enabled = HideRoadMarkings = UseGameSnowColor = true;
+        SnowplowClearing = true;
+        // Do not reset SeenWhatsNewRevision when restoring option defaults.
         TrafficInfluence = 70;
         SnowRed = 235;
         SnowGreen = 239;

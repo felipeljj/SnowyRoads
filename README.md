@@ -16,6 +16,23 @@ between them, even on busy lanes. Individual tires still deform the snow along
 their actual path; motorcycles and bicycles leave one central track. Distant
 lane masks preserve the average worn area without increasing texture memory.
 
+## Snowplows and performance
+
+Snowplows clear complete road sections and connected junctions, preserving snow
+on sidewalks and raised medians. Cleared sections stay consistent after saving
+and loading; fresh snowfall gradually covers them again. Snow pushed aside forms
+piles along the road edges.
+
+**Snow → General → Snowplow clearing** controls this effect. Turning it off stops
+new clearing and piles; previously cleared sections recover with fresh snowfall.
+
+The update reduces repeated traffic, geometry and texture processing and spreads
+expensive work across frames to help busy cities. Improvements depend on the city
+and hardware.
+
+A localized **What's new** message explains the changes when the mod opens after
+an update. Its saved revision prevents it from appearing again on later launches.
+
 ## Build
 
 1. Install the official modding toolchain from **Options → Modding** in Cities:

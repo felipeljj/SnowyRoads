@@ -24,7 +24,10 @@ internal sealed class LaneWearMask : IDisposable
     private readonly Dictionary<PathNode, List<LaneState>> _ends = new();
     private readonly Dictionary<Vector2Int, List<LaneState>> _cells = new();
     private readonly HashSet<LaneState> _drawn = new();
-    private readonly List<LaneState> _visible = new();
+    private readonly AreaCache _nearCache = new();
+    private readonly AreaCache _farCache = new();
+    private readonly AreaCache _detailCache = new();
+    private int _topologyRevision;
     private readonly LaneRaster _raster;
     private readonly LaneRaster _distantRaster;
     private readonly LaneRaster _detailRaster;
@@ -35,8 +38,19 @@ internal sealed class LaneWearMask : IDisposable
     private bool _hasUpdated;
     private int _cursor;
     private readonly Plane[] _frustum = new Plane[6];
-    public int Drawn => _visible.Count;
+    public int Drawn => _detailCache.Visible.Count;
+    public int PreparedAreas { get; private set; }
+    public int ReusedAreas { get; private set; }
+    public long RetainedQuads { get; private set; }
+    public long PreparedQuads { get; private set; }
     public int Registered => _lanes.Count;
+    public int RestoredOnly => _restored.Count;
+    public int Rasterizations =>
+        _raster.Rasterizations + _distantRaster.Rasterizations + _detailRaster.Rasterizations;
+    public int ReusedRasterizations =>
+        _raster.ReusedRasterizations
+        + _distantRaster.ReusedRasterizations
+        + _detailRaster.ReusedRasterizations;
     public float PeakPressure { get; private set; }
 
     private readonly Dictionary<Bezier4x3, LaneSnow> _history;
@@ -128,6 +142,8 @@ internal sealed class LaneWearMask : IDisposable
                     && existing.Start.Equals(topology.m_StartNode)
                     && existing.End.Equals(topology.m_EndNode)
                     && existing.Width == width
+                    && existing.Length == Mathf.Max(1, curve.m_Length)
+                    && existing.Rail == rail
                 )
                     continue;
                 Remove(existing);
@@ -163,6 +179,7 @@ internal sealed class LaneWearMask : IDisposable
 
     private void AddCells(LaneState state)
     {
+        _topologyRevision++;
         float3 min = math.min(
             math.min(state.Curve.a, state.Curve.b),
             math.min(state.Curve.c, state.Curve.d)
@@ -198,6 +215,7 @@ internal sealed class LaneWearMask : IDisposable
 
     private void Remove(LaneState lane)
     {
+        _topologyRevision++;
         lane.Deleted = true;
         _states.Remove(lane.Entity);
         _lanes.Remove(lane);
@@ -262,7 +280,7 @@ internal sealed class LaneWearMask : IDisposable
                 (System.Diagnostics.Stopwatch.GetTimestamp() - started)
                     * 1000.0
                     / System.Diagnostics.Stopwatch.Frequency
-                > 1
+                > .4
             )
             {
                 break;
@@ -307,22 +325,33 @@ internal sealed class LaneWearMask : IDisposable
         }
     }
 
-    public void Draw(Camera camera, float influence, Vector3? cameraPivot = null)
+    public void Draw(Camera camera, float influence, Vector3? cameraPivot = null, int phase = -1)
     {
         Ray ray = camera.ViewportPointToRay(new Vector3(.5f, .5f, 0));
         float distance = Mathf.Abs(ray.direction.y) > .1f ? -ray.origin.y / ray.direction.y : 500;
         Vector3 focus = cameraPivot ?? ray.GetPoint(Mathf.Clamp(distance, 0, 3000));
-        if (Time.realtimeSinceStartup >= _nextDistantDraw)
+        if ((phase < 0 || phase == 2) && Time.realtimeSinceStartup >= _nextDistantDraw)
         {
             var farArea = WearView.DistantLaneArea(camera, focus, _farSize);
             _farSize = 1 / farArea.z;
-            DrawArea(camera, influence, farArea, _distantRaster, true);
+            DrawArea(camera, influence, farArea, _distantRaster, _farCache, true);
             _nextDistantDraw = Time.realtimeSinceStartup + .5f;
         }
-        var nearArea = WearView.LaneArea(camera, focus, _nearSize);
-        _nearSize = 1 / nearArea.z;
-        DrawArea(camera, influence, nearArea, _raster, false);
-        DrawArea(camera, influence, WearView.DetailLaneArea(camera, focus), _detailRaster, false);
+        if (phase < 0 || phase == 1)
+        {
+            var nearArea = WearView.LaneArea(camera, focus, _nearSize);
+            _nearSize = 1 / nearArea.z;
+            DrawArea(camera, influence, nearArea, _raster, _nearCache, false);
+        }
+        if (phase < 0 || phase == 0)
+            DrawArea(
+                camera,
+                influence,
+                WearView.DetailLaneArea(camera, focus),
+                _detailRaster,
+                _detailCache,
+                false
+            );
     }
 
     private void DrawArea(
@@ -330,57 +359,115 @@ internal sealed class LaneWearMask : IDisposable
         float influence,
         Vector4 area,
         LaneRaster raster,
+        AreaCache cache,
         bool distant
     )
     {
         float size = 1 / area.z;
-        _visible.Clear();
-        _drawn.Clear();
         PeakPressure = 0;
-        GeometryUtility.CalculateFrustumPlanes(camera, _frustum);
-        for (
-            int z = Mathf.FloorToInt(area.y / 128);
-            z <= Mathf.FloorToInt((area.y + size) / 128);
-            z++
-        )
+        Matrix4x4 culling = camera.cullingMatrix;
+        Matrix4x4 view = camera.projectionMatrix * camera.worldToCameraMatrix;
+        Vector3 eye = camera.transform.position;
+        bool viewChanged =
+            !cache.Ready
+            || cache.Topology != _topologyRevision
+            || !cache.Area.Equals(area)
+            || !cache.Culling.Equals(culling)
+            || !cache.View.Equals(view)
+            || !cache.Eye.Equals(eye);
+        if (viewChanged)
         {
+            cache.Candidates.Clear();
+            _drawn.Clear();
+            GeometryUtility.CalculateFrustumPlanes(camera, _frustum);
             for (
-                int x = Mathf.FloorToInt(area.x / 128);
-                x <= Mathf.FloorToInt((area.x + size) / 128);
-                x++
+                int z = Mathf.FloorToInt(area.y / 128);
+                z <= Mathf.FloorToInt((area.y + size) / 128);
+                z++
             )
             {
-                if (_cells.TryGetValue(new Vector2Int(x, z), out var list))
+                for (
+                    int x = Mathf.FloorToInt(area.x / 128);
+                    x <= Mathf.FloorToInt((area.x + size) / 128);
+                    x++
+                )
                 {
-                    foreach (var lane in list)
+                    if (_cells.TryGetValue(new Vector2Int(x, z), out var list))
                     {
-                        if (
-                            !lane.Deleted
-                            && influence > 0
-                            && (lane.Snow.Pressure > .001f || lane.Rail)
-                            && _drawn.Add(lane)
-                            && GeometryUtility.TestPlanesAABB(
-                                _frustum,
-                                new Bounds(lane.Center, Vector3.one * (lane.Length + lane.Width))
-                            )
-                        )
+                        foreach (var lane in list)
                         {
-                            _visible.Add(lane);
+                            if (
+                                !lane.Deleted
+                                && _drawn.Add(lane)
+                                && GeometryUtility.TestPlanesAABB(
+                                    _frustum,
+                                    new Bounds(
+                                        lane.Center,
+                                        Vector3.one * (lane.Length + lane.Width)
+                                    )
+                                )
+                            )
+                            {
+                                cache.Candidates.Add(lane);
+                            }
                         }
                     }
                 }
             }
+
+            cache.Area = area;
+            cache.Culling = culling;
+            cache.View = view;
+            cache.Eye = eye;
+            cache.Topology = _topologyRevision;
         }
 
-        Vector3 eye = camera.transform.position;
-        if (!distant)
-            _visible.Sort(
-                (a, b) => (a.Center - eye).sqrMagnitude.CompareTo((b.Center - eye).sqrMagnitude)
-            );
-        raster.Begin();
-        foreach (var lane in _visible)
+        if (PrepareRibbons(influence, eye, viewChanged, raster, cache, distant))
         {
-            if (raster.Count >= LaneRaster.MaximumQuads)
+            raster.Draw(area);
+            cache.Ready = true;
+        }
+        else
+            raster.Reuse(area);
+    }
+
+    // CPU preparation is separate from GPU submission so exact output can be
+    // checked against a full ribbon rebuild without needing a graphics device.
+    private bool PrepareRibbons(
+        float influence,
+        Vector3 eye,
+        bool viewChanged,
+        LaneRaster raster,
+        AreaCache cache,
+        bool distant
+    )
+    {
+        PeakPressure = 0;
+        // Keep inactive lanes in the spatial cache so the first car reactivates
+        // them without requiring a camera move or a topology refresh.
+        cache.Active.Begin();
+        foreach (var lane in cache.Candidates)
+            if (influence > 0 && (lane.Snow.Pressure > .001f || lane.Rail))
+                cache.Active.Add(new LaneInput(lane, 0, 0, 0, 0));
+        bool selectionChanged = cache.Active.End();
+        if (viewChanged || selectionChanged)
+        {
+            cache.Visible.Clear();
+            foreach (var input in cache.Active.Items)
+                cache.Visible.Add(input.Lane);
+            if (!distant)
+                cache.Visible.Sort(
+                    (a, b) => (a.Center - eye).sqrMagnitude.CompareTo((b.Center - eye).sqrMagnitude)
+                );
+        }
+
+        cache.Inputs.Begin();
+        cache.Retain.Clear();
+        int quads = 0;
+        int previousQuads = 0;
+        foreach (var lane in cache.Visible)
+        {
+            if (quads >= LaneRaster.MaximumQuads)
             {
                 break;
             }
@@ -393,7 +480,7 @@ internal sealed class LaneWearMask : IDisposable
             // Spend the far budget across the whole view. Stopping after the
             // nearest ribbons left a sharp wall of pristine snow in dense cities.
             int maximumSteps = distant
-                ? Math.Max(1, LaneRaster.MaximumQuads / Math.Max(1, _visible.Count))
+                ? Math.Max(1, LaneRaster.MaximumQuads / Math.Max(1, cache.Visible.Count))
                 : 96;
             int steps = Mathf.Clamp(
                 Mathf.CeilToInt(lane.Length / segmentLength),
@@ -402,28 +489,48 @@ internal sealed class LaneWearMask : IDisposable
             );
             float start = Endpoint(lane, lane.Start);
             float end = Endpoint(lane, lane.End);
+            var input = new LaneInput(lane, steps, lane.Snow.Pressure, start, end);
+            int index = cache.Inputs.Count;
+            bool hasPrevious = index < cache.Inputs.Items.Count;
+            LaneInput previous = hasPrevious ? cache.Inputs.Items[index] : default;
+            cache.Retain.Add(
+                cache.Ready && hasPrevious && quads == previousQuads && input.Equals(previous)
+            );
+            previousQuads += previous.Steps;
+            cache.Inputs.Add(input);
+            quads += steps;
+        }
+        bool inputsChanged = cache.Inputs.End();
+        if (cache.Ready && !inputsChanged)
+        {
+            ReusedAreas++;
+            RetainedQuads += Math.Min(quads, LaneRaster.MaximumQuads);
+            return false;
+        }
+        cache.Ready = false;
+        raster.Begin();
+        for (int row = 0; row < cache.Inputs.Items.Count; row++)
+        {
+            var input = cache.Inputs.Items[row];
+            var lane = input.Lane;
+            int steps = input.Steps;
+            if (cache.Retain[row])
+            {
+                RetainedQuads += Math.Min(steps, LaneRaster.MaximumQuads - raster.Count);
+                raster.Retain(steps);
+                continue;
+            }
+            PreparedQuads += Math.Min(steps, LaneRaster.MaximumQuads - raster.Count);
+            var geometry = lane.GetGeometry(steps);
             Vector3 previousLeft = default;
             Vector3 previousRight = default;
             float previousPressure = 0;
             for (int i = 0; i <= steps; i++)
             {
-                float t = i / (float)steps;
-                float3 p = MathUtils.Position(lane.Curve, t);
-                float3 tangent = MathUtils.Tangent(lane.Curve, t);
-                float3 side =
-                    math.normalizesafe(new float3(tangent.z, 0, -tangent.x)) * lane.Width * .5f;
-                float pressure = Mathf.Lerp(
-                    start,
-                    lane.Snow.Pressure,
-                    Mathf.SmoothStep(0, 1, t * lane.Length / 5)
-                );
-                pressure = Mathf.Lerp(
-                    end,
-                    pressure,
-                    Mathf.SmoothStep(0, 1, (1 - t) * lane.Length / 5)
-                );
-                Vector3 left = p - side;
-                Vector3 right = p + side;
+                float pressure = Mathf.Lerp(input.Start, input.Pressure, geometry.StartBlend[i]);
+                pressure = Mathf.Lerp(input.End, pressure, geometry.EndBlend[i]);
+                Vector3 left = geometry.Left[i];
+                Vector3 right = geometry.Right[i];
                 if (i > 0)
                 {
                     raster.Add(
@@ -444,7 +551,8 @@ internal sealed class LaneWearMask : IDisposable
             }
         }
 
-        raster.Draw(area);
+        PreparedAreas++;
+        return true;
     }
 
     public void Dispose()
@@ -456,8 +564,88 @@ internal sealed class LaneWearMask : IDisposable
 
     public void ProbeGpu(Action<string> report) => _raster.ProbeGpu(report);
 
+    private sealed class AreaCache
+    {
+        public bool Ready;
+        public int Topology;
+        public Vector4 Area;
+        public Matrix4x4 Culling;
+        public Matrix4x4 View;
+        public Vector3 Eye;
+        public readonly List<LaneState> Candidates = new();
+        public readonly List<LaneState> Visible = new();
+        public readonly ExactSequence<LaneInput> Active = new();
+        public readonly ExactSequence<LaneInput> Inputs = new();
+        public readonly List<bool> Retain = new();
+    }
+
+    private readonly struct LaneInput : IEquatable<LaneInput>
+    {
+        public readonly LaneState Lane;
+        public readonly int Steps;
+        public readonly float Pressure,
+            Start,
+            End;
+
+        public LaneInput(LaneState lane, int steps, float pressure, float start, float end)
+        {
+            Lane = lane;
+            Steps = steps;
+            Pressure = pressure;
+            Start = start;
+            End = end;
+        }
+
+        public bool Equals(LaneInput other) =>
+            ReferenceEquals(Lane, other.Lane)
+            && Steps == other.Steps
+            && Pressure.Equals(other.Pressure)
+            && Start.Equals(other.Start)
+            && End.Equals(other.End);
+    }
+
+    private sealed class RibbonGeometry
+    {
+        public readonly Vector3[] Left,
+            Right;
+        public readonly float[] StartBlend,
+            EndBlend;
+
+        public RibbonGeometry(int steps)
+        {
+            Left = new Vector3[steps + 1];
+            Right = new Vector3[steps + 1];
+            StartBlend = new float[steps + 1];
+            EndBlend = new float[steps + 1];
+        }
+    }
+
     private sealed class LaneState
     {
+        // Bound per-lane storage even when the distant budget changes step counts.
+        private readonly LruCache<int, RibbonGeometry> _geometry = new(4);
+
+        public RibbonGeometry GetGeometry(int steps)
+        {
+            if (_geometry.TryGetValue(steps, out var cached))
+                return cached;
+            var geometry = new RibbonGeometry(steps);
+            for (int i = 0; i <= steps; i++)
+            {
+                float t = i / (float)steps;
+                float3 p = MathUtils.Position(Curve, t);
+                float3 tangent = MathUtils.Tangent(Curve, t);
+                float3 side =
+                    math.normalizesafe(new float3(tangent.z, 0, -tangent.x)) * Width * .5f;
+                geometry.Left[i] = p - side;
+                geometry.Right[i] = p + side;
+                geometry.StartBlend[i] = Mathf.SmoothStep(0, 1, t * Length / 5);
+                geometry.EndBlend[i] = Mathf.SmoothStep(0, 1, (1 - t) * Length / 5);
+            }
+            _geometry.Set(steps, geometry);
+            return geometry;
+        }
+
         public Entity Entity;
         public Bezier4x3 Curve;
         public float Width;

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using RoadSnow.Core;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
@@ -27,6 +28,28 @@ internal sealed class PlowedSnow : IDisposable
     private readonly List<int> _indices = new();
     private readonly List<Vector3Int> _remove = new();
     private readonly List<Deposit> _visible = new();
+    private readonly ExactSequence<PlowInput> _inputs = new();
+    private bool _geometryReady;
+    public long GeometryReuses { get; private set; }
+
+    private readonly struct PlowInput : IEquatable<PlowInput>
+    {
+        public readonly Vector3 Position,
+            Direction;
+        public readonly float Height;
+
+        public PlowInput(Deposit deposit, float height)
+        {
+            Position = deposit.Position;
+            Direction = deposit.Direction;
+            Height = height;
+        }
+
+        public bool Equals(PlowInput other) =>
+            Position.Equals(other.Position)
+            && Direction.Equals(other.Direction)
+            && Height.Equals(other.Height);
+    }
 
     public void Add(Vector3 position, Vector3 direction, float volume)
     {
@@ -74,7 +97,15 @@ internal sealed class PlowedSnow : IDisposable
             Deposits.Remove(key);
     }
 
-    public void Draw(Camera camera, Material source, Shader shader, bool enabled, float now)
+    public void Draw(
+        Camera camera,
+        Material source,
+        Shader shader,
+        bool enabled,
+        float now,
+        bool prepare = true,
+        bool submit = true
+    )
     {
         if (!enabled || shader == null)
             return;
@@ -85,23 +116,18 @@ internal sealed class PlowedSnow : IDisposable
             _mesh.MarkDynamic();
         }
         _material.SetColor("_BaseColor", source.GetColor("_BaseColor"));
-        if (now >= _nextBuild)
+        if (prepare && now >= _nextBuild)
         {
             _nextBuild = now + .35f;
-            _vertices.Clear();
-            _uv.Clear();
-            _rise.Clear();
-            _indices.Clear();
             _visible.Clear();
+            Vector3 eye = camera.transform.position;
             foreach (var deposit in Deposits.Values)
-                if ((deposit.Position - camera.transform.position).sqrMagnitude < 260 * 260)
+                if ((deposit.Position - eye).sqrMagnitude < 260 * 260)
                     _visible.Add(deposit);
             _visible.Sort(
-                (a, b) =>
-                    (a.Position - camera.transform.position).sqrMagnitude.CompareTo(
-                        (b.Position - camera.transform.position).sqrMagnitude
-                    )
+                (a, b) => (a.Position - eye).sqrMagnitude.CompareTo((b.Position - eye).sqrMagnitude)
             );
+            _inputs.Begin();
             for (int n = 0; n < Math.Min(512, _visible.Count); n++)
             {
                 var deposit = _visible[n];
@@ -110,48 +136,60 @@ internal sealed class PlowedSnow : IDisposable
                     - Mathf.SmoothStep(
                         0,
                         1,
-                        Mathf.InverseLerp(
-                            180,
-                            260,
-                            Vector3.Distance(deposit.Position, camera.transform.position)
-                        )
+                        Mathf.InverseLerp(180, 260, Vector3.Distance(deposit.Position, eye))
                     );
                 float height = Mathf.Min(.55f, deposit.Volume / .9f) * fade;
-                Vector3 side = Vector3.Cross(Vector3.up, deposit.Direction).normalized;
-                int first = _vertices.Count;
-                for (int row = 0; row <= 4; row++)
-                for (int col = 0; col <= 4; col++)
-                {
-                    float u = col / 4f,
-                        t = row / 4f;
-                    float rise = height * Mathf.Sin(Mathf.PI * u) * Mathf.Sin(Mathf.PI * t);
-                    Vector3 p =
-                        deposit.Position
-                        + deposit.Direction * ((t - .5f) * 2.8f)
-                        + side * ((u - .5f) * 1.1f);
-                    _vertices.Add(p + Vector3.up * rise);
-                    _uv.Add(new Vector2(u, t));
-                    _rise.Add(new Vector2(p.y, rise));
-                    if (row == 4 || col == 4)
-                        continue;
-                    int a = first + row * 5 + col;
-                    _indices.Add(a);
-                    _indices.Add(a + 5);
-                    _indices.Add(a + 1);
-                    _indices.Add(a + 1);
-                    _indices.Add(a + 5);
-                    _indices.Add(a + 6);
-                }
+                _inputs.Add(new PlowInput(deposit, height));
             }
-            _mesh.Clear();
-            _mesh.SetVertices(_vertices);
-            _mesh.SetUVs(0, _uv);
-            _mesh.SetUVs(2, _rise);
-            _mesh.SetTriangles(_indices, 0);
-            _mesh.RecalculateNormals();
-            _mesh.RecalculateBounds();
+            bool changed = _inputs.End();
+            if (!changed && _geometryReady)
+                GeometryReuses++;
+            else
+            {
+                _geometryReady = true;
+                _vertices.Clear();
+                _uv.Clear();
+                _rise.Clear();
+                _indices.Clear();
+                foreach (var deposit in _inputs.Items)
+                {
+                    float height = deposit.Height;
+                    Vector3 side = Vector3.Cross(Vector3.up, deposit.Direction).normalized;
+                    int first = _vertices.Count;
+                    for (int row = 0; row <= 4; row++)
+                    for (int col = 0; col <= 4; col++)
+                    {
+                        float u = col / 4f,
+                            t = row / 4f;
+                        float rise = height * Mathf.Sin(Mathf.PI * u) * Mathf.Sin(Mathf.PI * t);
+                        Vector3 p =
+                            deposit.Position
+                            + deposit.Direction * ((t - .5f) * 2.8f)
+                            + side * ((u - .5f) * 1.1f);
+                        _vertices.Add(p + Vector3.up * rise);
+                        _uv.Add(new Vector2(u, t));
+                        _rise.Add(new Vector2(p.y, rise));
+                        if (row == 4 || col == 4)
+                            continue;
+                        int a = first + row * 5 + col;
+                        _indices.Add(a);
+                        _indices.Add(a + 5);
+                        _indices.Add(a + 1);
+                        _indices.Add(a + 1);
+                        _indices.Add(a + 5);
+                        _indices.Add(a + 6);
+                    }
+                }
+                _mesh.Clear();
+                _mesh.SetVertices(_vertices);
+                _mesh.SetUVs(0, _uv);
+                _mesh.SetUVs(2, _rise);
+                _mesh.SetTriangles(_indices, 0);
+                _mesh.RecalculateNormals();
+                _mesh.RecalculateBounds();
+            }
         }
-        if (_mesh.vertexCount > 0)
+        if (submit && _mesh.vertexCount > 0)
             Graphics.DrawMesh(
                 _mesh,
                 Matrix4x4.identity,
@@ -197,6 +235,7 @@ internal sealed class PlowedSnow : IDisposable
 
     public void Dispose()
     {
+        _geometryReady = false;
         if (_material != null)
             Object.Destroy(_material);
         if (_mesh != null)

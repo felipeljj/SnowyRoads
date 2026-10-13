@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using RoadSnow.Core;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -12,7 +13,8 @@ internal sealed class LaneRaster : IDisposable
     public const int Size = 1024;
     public const int MaximumQuads = 65536;
     private readonly ComputeShader _shader;
-    private readonly List<Quad> _quads = new();
+    private readonly ExactSequence<Quad> _quads = new();
+    private bool _hasRaster;
     private ComputeBuffer _buffer;
     private readonly int _clear;
     private readonly int _raster;
@@ -24,6 +26,8 @@ internal sealed class LaneRaster : IDisposable
     private readonly string _binding;
     public RenderTexture Texture { get; }
     public int Count => _quads.Count;
+    public int Rasterizations { get; private set; }
+    public int ReusedRasterizations { get; private set; }
 
     public LaneRaster(ComputeShader shader, bool distant = false, bool detail = false)
     {
@@ -63,9 +67,10 @@ internal sealed class LaneRaster : IDisposable
 
     public void Begin()
     {
-        _quads.Clear();
-        _probePressure = 0;
+        _quads.Begin();
     }
+
+    public void Retain(int count) => _quads.Retain(Math.Min(count, MaximumQuads - _quads.Count));
 
     public void Add(
         Vector3 a,
@@ -93,15 +98,35 @@ internal sealed class LaneRaster : IDisposable
                 Shape = new Vector4(width, rail ? 1 : 0, 0, 0),
             }
         );
-        if ((start + end) * .5f > _probePressure)
-        {
-            _probePressure = (start + end) * .5f;
-            _probePoint = (a + b + c + d) * .25f;
-        }
     }
 
     public void Draw(Vector4 area)
     {
+        Render(area, _quads.End());
+    }
+
+    // Caller has compared all lane inputs exactly, before expanding the ribbons.
+    // Render still restores a lost GPU texture from the retained CPU quads.
+    public void Reuse(Vector4 area) => Render(area, false);
+
+    private void Render(Vector4 area, bool changed)
+    {
+        if (!Texture.IsCreated())
+        {
+            Texture.Create();
+            _shader.SetTexture(_clear, "_Output", Texture);
+            _shader.SetTexture(_raster, "_Output", Texture);
+            _hasRaster = false;
+        }
+        // LaneRaster.compute reads only the ordered quads and the area. Exact
+        // equality preserves tiny pressure/height changes and stacked road order.
+        if (_hasRaster && !changed && _area.Equals(area))
+        {
+            ReusedRasterizations++;
+            Bind(area);
+            return;
+        }
+        _hasRaster = false;
         _area = area;
         _shader.SetVector("_Area", area);
         _shader.Dispatch(_clear, Size / 8, Size / 8, 4);
@@ -113,21 +138,42 @@ internal sealed class LaneRaster : IDisposable
                 _buffer = new ComputeBuffer(Mathf.NextPowerOfTwo(Math.Max(64, _quads.Count)), 80);
             }
 
-            _buffer.SetData(_quads);
+            _buffer.SetData(_quads.Items);
             _shader.SetBuffer(_raster, "_Quads", _buffer);
             _shader.Dispatch(_raster, _quads.Count, 1, 1);
         }
 
+        _hasRaster = true;
+        Rasterizations++;
+        Bind(area);
+    }
+
+    private void Bind(Vector4 area)
+    {
         Shader.SetGlobalTexture(_binding + "Packed", Texture);
         Shader.SetGlobalVector(_binding + "Area", area);
     }
 
     public void ProbeGpu(Action<string> report)
     {
-        if (_probePending || _probePressure < .01f || !SystemInfo.supportsAsyncGPUReadback)
+        if (_probePending || !SystemInfo.supportsAsyncGPUReadback)
         {
             return;
         }
+
+        // Diagnostics run once per reporting window, not per generated vertex.
+        _probePressure = 0;
+        foreach (var quad in _quads.Items)
+        {
+            float pressureAtQuad = (quad.A.w + quad.C.w) * .5f;
+            if (pressureAtQuad > _probePressure)
+            {
+                _probePressure = pressureAtQuad;
+                _probePoint = (quad.A + quad.B + quad.C + quad.D) * .25f;
+            }
+        }
+        if (_probePressure < .01f)
+            return;
 
         Vector3 point = _probePoint;
         float pressure = _probePressure;
@@ -180,12 +226,19 @@ internal sealed class LaneRaster : IDisposable
         Object.Destroy(_shader);
     }
 
-    private struct Quad
+    private struct Quad : IEquatable<Quad>
     {
         public Vector4 A;
         public Vector4 B;
         public Vector4 C;
         public Vector4 D;
         public Vector4 Shape;
+
+        public bool Equals(Quad other) =>
+            A.Equals(other.A)
+            && B.Equals(other.B)
+            && C.Equals(other.C)
+            && D.Equals(other.D)
+            && Shape.Equals(other.Shape);
     }
 }

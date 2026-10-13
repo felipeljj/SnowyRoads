@@ -43,6 +43,7 @@ public partial class RoadSnowSystem
         {
             _dormant = dry;
             _atlas?.SetVisible(!dry);
+            _cachedCoverage.SetVisible(!dry);
             _facilities?.SetVisible(!dry);
             _snowBanks?.Invalidate();
             _vehicleHistory.Clear();
@@ -51,6 +52,11 @@ public partial class RoadSnowSystem
             _trainHistory.Clear();
             if (dry)
             {
+                _sectionPlowHistory.Clear();
+                _completedSectionOwners.Clear();
+                _cachedCoverage.ResetSectionPlows();
+                foreach (var patch in _activePatches)
+                    patch.RestoreSectionPlow(-1, _snowfall.TotalMm);
                 _wearHistory.Clear();
                 foreach (var lane in _laneHistory.Values)
                     lane.Advance(0, 0, 0, false, 0, _snowfall.TotalMm);

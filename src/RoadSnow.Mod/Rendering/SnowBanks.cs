@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using RoadSnow.Core;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
@@ -13,10 +14,34 @@ internal sealed class SnowBanks : IDisposable
     // Keep the previous set visible while building to avoid flicker and frame spikes.
     private readonly Material _material;
     private readonly List<Batch>[] _pools = { new(), new() };
-    private readonly Dictionary<(RoadPatch, int), SnowBankMesh> _cache = new();
+    private readonly LruCache<(RoadPatch, int), SnowBankMesh> _cache = new(768);
     private readonly Dictionary<RoadPatch, int> _lods = new();
     private readonly List<(RoadPatch Patch, float Distance)> _near = new();
     private readonly List<Group> _groups = new();
+    private readonly ExactSequence<BankInput> _inputs = new();
+    private bool _inputsReady;
+    private int _assemble;
+    public long GroupReuses { get; private set; }
+
+    private readonly struct BankInput : IEquatable<BankInput>
+    {
+        public readonly RoadPatch Patch;
+        public readonly SnowBankMesh Mesh;
+        private readonly int _metadata;
+
+        public BankInput(RoadPatch patch, SnowBankMesh mesh)
+        {
+            Patch = patch;
+            Mesh = mesh;
+            _metadata = patch.BankMetadataRevision;
+        }
+
+        public bool Equals(BankInput other) =>
+            ReferenceEquals(Patch, other.Patch)
+            && ReferenceEquals(Mesh, other.Mesh)
+            && _metadata == other._metadata;
+    }
+
     private int _front;
     private int _scan;
     private int _build;
@@ -54,6 +79,7 @@ internal sealed class SnowBanks : IDisposable
         }
 
         _cache.Clear();
+        _inputsReady = false;
         _lods.Clear();
         _stage = 0;
         _next = 0;
@@ -123,10 +149,12 @@ internal sealed class SnowBanks : IDisposable
             _scan = _build = _upload = _triangles = 0;
             _near.Clear();
             _groups.Clear();
+            _inputs.Begin();
+            _assemble = 0;
             _stage = 1;
         }
 
-        while (_stage == 1 && _scan < patches.Count && Elapsed(start) < .65)
+        while (_stage == 1 && _scan < patches.Count && Elapsed(start) < .3)
         {
             var patch = patches[_scan++];
             if (!patch.Active || patch.BankBands.Length == 0 && !(realistic && patch.HasRoadBanks))
@@ -158,7 +186,7 @@ internal sealed class SnowBanks : IDisposable
         }
 
         int built = 0;
-        while (_stage == 2 && _build < _near.Count && built++ < 2 && Elapsed(start) < .9)
+        while (_stage == 2 && _build < _near.Count && built++ < 2 && Elapsed(start) < .4)
         {
             var item = _near[_build++];
             var patch = item.Patch;
@@ -183,12 +211,7 @@ internal sealed class SnowBanks : IDisposable
             var key = (patch, lod);
             if (!_cache.TryGetValue(key, out var mesh))
             {
-                if (_cache.Count >= 128)
-                {
-                    _cache.Clear();
-                }
-
-                _cache.Add(key, mesh = patch.BuildBankMesh(lod, realistic));
+                _cache.Set(key, mesh = patch.BuildBankMesh(lod, realistic));
             }
 
             int budget = (realistic ? 24000 : 12000) * quality;
@@ -198,7 +221,7 @@ internal sealed class SnowBanks : IDisposable
             {
                 key = (patch, ++lod);
                 if (!_cache.TryGetValue(key, out mesh))
-                    _cache[key] = mesh = patch.BuildBankMesh(lod, realistic);
+                    _cache.Set(key, mesh = patch.BuildBankMesh(lod, realistic));
             }
             _lods[patch] = lod;
             if (_triangles + mesh.TriangleCount > budget)
@@ -208,19 +231,42 @@ internal sealed class SnowBanks : IDisposable
 
             // Per-vertex retention removes atlas ownership from this renderer.
             // A texture-group cap used to drop valid banks when the camera moved.
-            if (_groups.Count == 0)
-                _groups.Add(new Group());
-            var group = _groups[0];
-            group.Append(patch, mesh);
+            _inputs.Add(new BankInput(patch, mesh));
             _triangles += mesh.TriangleCount;
         }
 
         if (_stage == 2 && _build >= _near.Count)
         {
+            bool changed = _inputs.End();
+            if (_inputsReady && !changed)
+            {
+                GroupReuses++;
+                _stage = 0;
+                _next = now + 1;
+                UpdateMs = Elapsed(start);
+                return;
+            }
+            _inputsReady = true;
             _stage = 3;
         }
 
         if (_stage == 3)
+        {
+            while (_assemble < _inputs.Items.Count && Elapsed(start) < .4)
+            {
+                var input = _inputs.Items[_assemble++];
+                if (_groups.Count == 0)
+                    _groups.Add(new Group());
+                _groups[0].Append(input.Patch, input.Mesh);
+            }
+            if (_assemble < _inputs.Items.Count)
+            {
+                UpdateMs = Elapsed(start);
+                return;
+            }
+            _stage = 4;
+        }
+        if (_stage == 4)
         {
             var back = _pools[1 - _front];
             if (_upload < _groups.Count)
@@ -292,7 +338,9 @@ internal sealed class SnowBanks : IDisposable
                 UV.Add(uv);
                 var metadata = patch.BankMetadata(uv);
                 metadata.w = mesh.Interior[i] ? -1 : 1;
-                Metadata.Add(new Vector2(metadata.x * metadata.y, metadata.w));
+                Metadata.Add(
+                    new Vector2(metadata.x * metadata.y, mesh.Interior[i] ? -1 - metadata.z : 1)
+                );
             }
 
             foreach (int index in mesh.Triangles)
@@ -308,6 +356,18 @@ internal sealed class SnowBanks : IDisposable
         private readonly Mesh _mesh;
         private readonly MeshRenderer _renderer;
         private readonly MaterialPropertyBlock _properties = new();
+        private Group _uploaded;
+
+        private static bool Same<T>(List<T> a, List<T> b)
+            where T : IEquatable<T>
+        {
+            if (a.Count != b.Count)
+                return false;
+            for (int i = 0; i < a.Count; i++)
+                if (!a[i].Equals(b[i]))
+                    return false;
+            return true;
+        }
 
         public Batch(Material material)
         {
@@ -328,6 +388,22 @@ internal sealed class SnowBanks : IDisposable
 
         public void Upload(Group group)
         {
+            // Groups are immutable after submission. Compare exact values, including
+            // weather metadata, so reuse never freezes melting or changed retention.
+            bool sameGeometry =
+                _uploaded != null
+                && Same(_uploaded.Vertices, group.Vertices)
+                && Same(_uploaded.UV, group.UV)
+                && Same(_uploaded.BaseRise, group.BaseRise)
+                && Same(_uploaded.Indices, group.Indices);
+            if (sameGeometry)
+            {
+                if (!Same(_uploaded.Metadata, group.Metadata))
+                    _mesh.SetUVs(3, group.Metadata);
+                _uploaded = group;
+                return;
+            }
+            _uploaded = group;
             _renderer.enabled = false;
             _mesh.Clear();
             _mesh.SetVertices(group.Vertices);

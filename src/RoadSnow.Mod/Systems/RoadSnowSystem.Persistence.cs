@@ -15,7 +15,8 @@ namespace RoadSnow.Mod;
 
 public partial class RoadSnowSystem
 {
-    private const int SaveVersion = 5;
+    private const int SaveVersion = 7;
+    private bool _coverageNeedsBootstrap = true;
     private const int MaximumSaveBytes = 192 * 1024 * 1024;
 
     // World geometry keys survive regenerated lane entities. A rebuilt road gets a fresh state.
@@ -32,7 +33,7 @@ public partial class RoadSnowSystem
         using (var data = new BinaryWriter(stream, System.Text.Encoding.UTF8, true))
         {
             data.Write(_snowfall.TotalMm);
-            _wearHistory.Write(data);
+            _wearHistory.Write(data, 32768, 32 * 1024 * 1024);
             data.Write(_laneHistory.Count);
             foreach (var lane in _laneHistory)
             {
@@ -54,10 +55,25 @@ public partial class RoadSnowSystem
             }
             _cachedCoverage.Write(
                 data,
-                _activePatches.Where(p => p.Active).Select(p => p.CacheSurface())
+                _activePatches.Where(p => p.Active).Select(p => p.CacheSurface()),
+                MaximumSaveBytes - checked((int)stream.Length) - 2 * 1024 * 1024,
+                _coverageCenters,
+                plowState: true
             );
             data.Write(_snowActivity.Active);
+            data.Write(_cachedCoverage.LastOmitted + (_coverageNeedsBootstrap ? 1 : 0));
         }
+        Mod.log.Info(
+            $"RoadSnow saved coverage: surfaces={_cachedCoverage.LastWritten}, omitted={_cachedCoverage.LastOmitted}, payloadBytes={stream.Length}, version={SaveVersion}"
+        );
+        if (_cachedCoverage.LastOmitted > 0)
+            Mod.log.Warn("Snow coverage is incomplete; missing geometry will be rebuilt on load.");
+        if (_wearHistory.LastSaveOmitted > 0)
+            Mod.log.Warn(
+                $"Snow wear history reached its save safety bound: omittedTiles={_wearHistory.LastSaveOmitted}."
+            );
+        if (stream.Length > MaximumSaveBytes)
+            throw new InvalidDataException("Snow state exceeds the save safety bound.");
         writer.Write(SaveVersion);
         writer.Write(checked((int)stream.Length));
         using var bytes = new NativeArray<byte>(stream.ToArray(), Allocator.Temp);
@@ -85,7 +101,7 @@ public partial class RoadSnowSystem
             using var stream = new MemoryStream(bytes.ToArray(), false);
             using var data = new BinaryReader(stream);
             _snowfall.Restore(data.ReadDouble());
-            _wearHistory.Read(data);
+            _wearHistory.Read(data, version >= 6 ? 32768 : 2048);
             int lanes = ReadCount(data, 500000);
             for (int i = 0; i < lanes; i++)
             {
@@ -112,7 +128,11 @@ public partial class RoadSnowSystem
             for (int i = 0; i < residuals; i++)
                 _residualHistory[ReadPoint(data)] = data.ReadSingle();
             if (version >= 2)
-                _cachedCoverage.Read(data);
+            {
+                _cachedCoverage.Read(data, version >= 6, version >= 7);
+                if (version < 7)
+                    _cachedCoverage.DiscardLegacyPlowChannel();
+            }
             if (version >= 3)
                 _snowActivity.Restore(data.ReadBoolean());
             else
@@ -126,7 +146,9 @@ public partial class RoadSnowSystem
                         || _plowedSnow.Deposits.Count > 0
                 );
             }
-            if (version < 5) _cachedCoverage.Clear();
+            if (version < 5)
+                _cachedCoverage.Clear();
+            _coverageNeedsBootstrap = version < 6 || data.ReadInt32() > 0;
             if (stream.Position != stream.Length)
                 throw new InvalidDataException("Unexpected snow save payload.");
         }
@@ -139,6 +161,8 @@ public partial class RoadSnowSystem
 
     public void SetDefaults(Context context)
     {
+        _sectionPlowHistory.Clear();
+        _completedSectionOwners.Clear();
         _wearHistory.Clear();
         _laneHistory.Clear();
         _laneLayout.Clear();
@@ -147,6 +171,7 @@ public partial class RoadSnowSystem
         _plowedSnow.Deposits.Clear();
         _cachedCoverage.Clear();
         _snowActivity.Restore(false);
+        _coverageNeedsBootstrap = true;
     }
 
     private static int ReadCount(BinaryReader reader, int maximum)

@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace RoadSnow.Mod;
 
-internal sealed class RoadPatch : IDisposable
+internal sealed partial class RoadPatch : IDisposable
 {
     private readonly SnowAtlas.Slot _slot;
     private readonly byte[] _mask;
@@ -28,6 +28,11 @@ internal sealed class RoadPatch : IDisposable
     private readonly Vector3[] _vertices;
     private readonly Vector2[] _uv;
     private readonly int[] _triangles;
+    private readonly bool[] _junctionRoadTriangles;
+    private readonly byte[] _roadVertexMask;
+    private readonly bool _hasPlowRoad;
+    private readonly SectionPlowState _sectionPlow = new();
+    public double PlowedAt => _sectionPlow.AtSnowfallMm;
     private readonly Bounds _bounds;
     private readonly Bounds[] _rowBounds;
     private readonly int[] _rowStarts;
@@ -40,6 +45,7 @@ internal sealed class RoadPatch : IDisposable
     public RoadSnowField Field { get; }
     public Vector3 Center { get; }
     public float ResidualDepth => _residual.DepthMm;
+    public int BankMetadataRevision { get; private set; }
 
     public void RestoreResidual(float depth)
     {
@@ -60,6 +66,7 @@ internal sealed class RoadPatch : IDisposable
     public Vector3[] SamplePositions { get; private set; }
     public SnowBankBand[] BankBands { get; }
     public Bounds Bounds => _bounds;
+
     public Vector4 BankMetadata(Vector2 uv)
     {
         int x = Mathf.Clamp(Mathf.RoundToInt(uv.x * (Field.Columns - 1)), 0, Field.Columns - 1);
@@ -69,36 +76,18 @@ internal sealed class RoadPatch : IDisposable
 
     public CachedCoverage.Surface CacheSurface()
     {
-        if (_nodeGeometry.HasValue)
-            return new CachedCoverage.Surface
-            {
-                Center = Center,
-                Vertices = _vertices,
-                Indices = _triangles,
-            };
-        int stride = _vertices.Length / (Steps + 1);
-        var vertices = new Vector3[5 * stride];
-        var indices = new int[4 * (stride - 1) * 6];
-        for (int row = 0; row < 5; row++)
-            Array.Copy(_vertices, row * 3 * stride, vertices, row * stride, stride);
-        int at = 0;
-        for (int row = 0; row < 4; row++)
-        for (int col = 0; col < stride - 1; col++)
-        {
-            int a = row * stride + col,
-                b = a + stride;
-            indices[at++] = a;
-            indices[at++] = b;
-            indices[at++] = a + 1;
-            indices[at++] = a + 1;
-            indices[at++] = b;
-            indices[at++] = b + 1;
-        }
         return new CachedCoverage.Surface
         {
             Center = Center,
-            Vertices = vertices,
-            Indices = indices,
+            Vertices = _vertices,
+            UV = _uv,
+            Indices = _triangles,
+            Pixels = (Color32[])_pixels.Clone(),
+            RoadVertexMask = _roadVertexMask,
+            PlowedAt = PlowedAt,
+            Columns = Field.Columns,
+            Rows = Field.Rows,
+            Detailed = Detailed,
         };
     }
 
@@ -114,8 +103,13 @@ internal sealed class RoadPatch : IDisposable
             (u, t, h) => SurfacePoint(u, t, h)
         );
         if (realistic && HasRoadBanks)
-            mesh.AddRoadbeds(_profile, Field.WidthMeters, Field.LengthMeters, lod,
-                (u, t, h) => SurfacePoint(u, t, h));
+            mesh.AddRoadbeds(
+                _profile,
+                Field.WidthMeters,
+                Field.LengthMeters,
+                lod,
+                (u, t, h) => SurfacePoint(u, t, h)
+            );
         return mesh;
     }
 
@@ -234,20 +228,41 @@ internal sealed class RoadPatch : IDisposable
 
         if (nodeGeometry.HasValue)
         {
-            var junction = nativeJunction ?? JunctionSurface.Build(
-                nodeGeometry.Value,
-                width,
-                _middleAcross,
-                profile,
-                height,
-                syncLeft,
-                syncRight
-            );
-            if (nativeJunction == null) JunctionSurface.CloseLiftedEdges(junction, height);
+            var junction =
+                nativeJunction
+                ?? JunctionSurface.Build(
+                    nodeGeometry.Value,
+                    width,
+                    _middleAcross,
+                    profile,
+                    height,
+                    syncLeft,
+                    syncRight
+                );
+            if (nativeJunction == null)
+                JunctionSurface.CloseLiftedEdges(junction, height);
             vertices = junction.Vertices.ConvertAll(p => (Vector3)p).ToArray();
             triangles = junction.Indices.ToArray();
             uv = new Vector2[vertices.Length];
             _rowStarts = junction.RowStarts.ToArray();
+            if (junction.RoadHeights.Count > 0 && profile != null)
+            {
+                float roadHeight = float.MaxValue;
+                foreach (var band in profile)
+                    if (!band.Pedestrian)
+                        roadHeight = Math.Min(roadHeight, band.Height);
+                _junctionRoadTriangles = new bool[triangles.Length / 3];
+                for (int i = 0; i < junction.RoadHeights.Count; i++)
+                    _junctionRoadTriangles[i] = PlowSurfaceClassification.IsRoad(
+                        i < junction.RoadKinds.Count
+                            ? junction.RoadKinds[i]
+                            : PlowSurfaceKind.Unknown,
+                        junction.RoadHeights[i],
+                        roadHeight,
+                        profile,
+                        i < junction.RoadRanges.Count ? junction.RoadRanges[i] : null
+                    );
+            }
         }
         else
         {
@@ -255,6 +270,41 @@ internal sealed class RoadPatch : IDisposable
             for (int i = 0; i <= Steps; i++)
                 _rowStarts[i] = i * acrossSteps * 6;
         }
+        var roadFaces = new bool[triangles.Length / 3];
+        float lowestRoad = float.MaxValue;
+        foreach (var band in profile ?? Array.Empty<SurfaceBand>())
+            if (!band.Pedestrian)
+                lowestRoad = Math.Min(lowestRoad, band.Height);
+        for (int i = 0; i < roadFaces.Length; i++)
+        {
+            if (_junctionRoadTriangles != null)
+                roadFaces[i] = _junctionRoadTriangles[i];
+            else if (!nodeGeometry.HasValue && profile != null)
+            {
+                float x =
+                    (
+                        uv[triangles[i * 3]].x
+                        + uv[triangles[i * 3 + 1]].x
+                        + uv[triangles[i * 3 + 2]].x
+                    )
+                        / 3
+                        * width
+                    - width / 2;
+                foreach (var band in profile)
+                    if (
+                        !band.Pedestrian
+                        && band.Height <= lowestRoad + .08f
+                        && x > band.Left
+                        && x < band.Right
+                    )
+                    {
+                        roadFaces[i] = true;
+                        break;
+                    }
+            }
+        }
+        _roadVertexMask = SectionPlowGeometry.Separate(ref vertices, ref uv, triangles, roadFaces);
+        _hasPlowRoad = Array.IndexOf(_roadVertexMask, (byte)255) >= 0;
         Center = _centers[Steps / 2];
         _vertices = vertices;
         _uv = uv;
@@ -295,7 +345,7 @@ internal sealed class RoadPatch : IDisposable
         }
 
         _bounds.Expand(new Vector3(0.1f, 5, 0.1f));
-        _slot = atlas.Allocate(detailed, vertices, uv, triangles);
+        _slot = atlas.Allocate(detailed, vertices, uv, triangles, _roadVertexMask);
         for (int z = 0; z < Field.Rows; z++)
         {
             for (int x = 0; x < Field.Columns; x++)
@@ -352,7 +402,7 @@ internal sealed class RoadPatch : IDisposable
                 );
                 Field.ScaleMeltRate(index, 0.42f + grain * 0.58f);
                 byte tint = (byte)(255 * (0.87f + grain * 0.13f));
-                _pixels[index] = new Color32(tint, tint, tint, 0);
+                _pixels[index] = new Color32(tint, tint, 0, 0);
             }
         }
     }
@@ -403,17 +453,16 @@ internal sealed class RoadPatch : IDisposable
             Field.CopyCoverageTo(_mask);
             HasSnow = false;
             bool changed = _uploadedRevision < 0;
+            bool bankChanged = changed;
             for (int i = 0; i < _pixels.Length; i++)
             {
                 byte coverage = SnowAppearance.Alpha(_mask[i], _grain[i], 1, false);
                 byte alpha = (byte)((coverage * _opacity[i] + 127) / 255);
                 byte bank = (byte)Mathf.RoundToInt(_retention[i] * 255);
                 byte retained = (byte)Mathf.RoundToInt(Mathf.Clamp01(_residual.DepthMm / 80) * 255);
-                byte depth = (byte)
-                    Mathf.RoundToInt(
-                        Mathf.Clamp01(Field.GetDepthMm(i % Field.Columns, i / Field.Columns) / 80)
-                            * 255
-                    );
+                bankChanged |= bank != _pixels[i].r || retained != _pixels[i].g;
+                byte depth = (byte)Mathf.RoundToInt(_sectionPlow.Strength * 255);
+                bankChanged |= depth != _pixels[i].b;
                 changed |=
                     alpha != _pixels[i].a
                     || bank != _pixels[i].r
@@ -432,6 +481,8 @@ internal sealed class RoadPatch : IDisposable
             }
 
             _uploadedRevision = Field.Revision;
+            if (bankChanged)
+                BankMetadataRevision++;
             Dirty = false;
             return changed;
         }
@@ -523,7 +574,7 @@ internal sealed class RoadPatch : IDisposable
     {
         surface = default;
         coordinates = default;
-        if (!_bounds.Contains(world))
+        if (!Contains(_bounds, world))
         {
             return false;
         }
@@ -532,7 +583,7 @@ internal sealed class RoadPatch : IDisposable
         bool found = false;
         for (int row = 0; row < _rowBounds.Length; row++)
         {
-            if (!_rowBounds[row].Contains(world))
+            if (!Contains(_rowBounds[row], world))
             {
                 continue;
             }
@@ -580,6 +631,19 @@ internal sealed class RoadPatch : IDisposable
         }
 
         return found;
+    }
+
+    private static bool Contains(Bounds bounds, Vector3 point)
+    {
+        // Same inclusive AABB test, avoiding a native transition per road row.
+        Vector3 delta = point - bounds.center,
+            extent = bounds.extents;
+        return delta.x >= -extent.x
+            && delta.x <= extent.x
+            && delta.y >= -extent.y
+            && delta.y <= extent.y
+            && delta.z >= -extent.z
+            && delta.z <= extent.z;
     }
 
     public bool StampFootprint(Vector3 world, Vector3 forward)

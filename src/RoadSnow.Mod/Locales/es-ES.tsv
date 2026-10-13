@@ -45,3 +45,8 @@ desc.RealisticSnow	Añade bordes de nieve desplazada junto a las huellas y acumu
 label.RealisticSnowWarning	Modo realista experimental
 desc.RealisticSnowWarning	Experimental: puede presentar errores y reducir el rendimiento. Puedes desactivar el modo realista en cualquier momento en los ajustes.
 label.Acknowledge	Entendido
+
+label.SnowplowClearing	Limpieza con quitanieves
+desc.SnowplowClearing	Permite que los quitanieves retiren la nieve del mod y dejen montones junto al bordillo. Desactívalo para detener nuevas limpiezas. Los tramos ya despejados vuelven a cubrirse con nuevas nevadas.
+label.WhatsNewTitle	Novedades de Snowy Roads
+desc.WhatsNewBody	Mejoras de rendimiento en ciudades con mucho tráfico. Los quitanieves ahora despejan tramos completos e intersecciones y conservan la nieve en aceras y bordillos. Las nuevas nevadas vuelven a cubrir las calles poco a poco. Puedes desactivar la limpieza en Nieve → General.

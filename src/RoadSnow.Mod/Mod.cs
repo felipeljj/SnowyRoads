@@ -45,6 +45,7 @@ public class Mod : IMod
         _setting.RegisterInOptionsUI();
         _optionsRegistered = true;
         updateSystem.UpdateAt<RoadSnowSystem>(SystemUpdatePhase.Rendering);
+        updateSystem.UpdateAt<ModNewsSystem>(SystemUpdatePhase.UIUpdate);
         log.Info("RoadSnow 5.7.5 junction and weather development build loaded.");
     }
 

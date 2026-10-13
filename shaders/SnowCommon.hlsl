@@ -39,10 +39,10 @@ float3 SnowTexture(float2 world) {
     // Rotating/blending this map made our pavement disagree with native lots.
     return SAMPLE_TEXTURE2D(_RoadSnowAlbedo,s_linear_repeat_sampler,world*.03).rgb;
 }
-float TrackTexel(Texture2D atlas,int2 pixel,float y) {
+float TrackTexel(Texture2D atlas,int2 pixel,float y,float burial) {
     float4 packed=atlas.Load(int3(pixel,0));
     float height=(round(packed.g*255)+round(packed.b*255)*256)*.1-1024;
-    return packed.r*(1-smoothstep(.12,.35,abs(y-height)));
+    return max(0,packed.r-burial)*(1-smoothstep(.12,.35,abs(y-height)));
 }
 float SampleSnowTracks(Texture2D atlas, Texture2D pages, float4 area, float3 p,
     float pageSide, float resolution, float atlasSize, out float resident) {
@@ -55,16 +55,20 @@ float SampleSnowTracks(Texture2D atlas, Texture2D pages, float4 area, float3 p,
     [loop] for(int layer=0;layer<4;layer++) {
         float4 entry=pages.SampleLevel(s_point_clamp_sampler,
             (page+float2(.5,.5+layer*pageSide))/float2(pageSide,pageSide*4),0);
-        if(entry.a<.5) break;
+        if(entry.a<.5/255.0) break;
+        // Apply integer snowfall loss to EACH texel before height filtering and
+        // bilinear interpolation, exactly like materializing the CPU image.
+        float burial=(255-round(entry.a*255))/255.0;
         float2 uv=(round(entry.rg*255)*resolution+local)/atlasSize;
         float4 packed=atlas.SampleLevel(s_point_clamp_sampler,uv,0);
+        packed.r=max(0,packed.r-burial);
         float height=(round(packed.g*255)+round(packed.b*255)*256)*.1-1024;
         float matchHeight=1-smoothstep(.12,.35,abs(p.y-height));
         float2 pixel=local-.5,blend=frac(pixel);
         int2 base=(int2)round(entry.rg*255)*resolution;
         int2 a=(int2)floor(pixel),b=min(a+1,(int2)(resolution-1));
-        float value=lerp(lerp(TrackTexel(atlas,base+a,p.y),TrackTexel(atlas,base+int2(b.x,a.y),p.y),blend.x),
-            lerp(TrackTexel(atlas,base+int2(a.x,b.y),p.y),TrackTexel(atlas,base+b,p.y),blend.x),blend.y);
+        float value=lerp(lerp(TrackTexel(atlas,base+a,p.y,burial),TrackTexel(atlas,base+int2(b.x,a.y),p.y,burial),blend.x),
+            lerp(TrackTexel(atlas,base+int2(a.x,b.y),p.y,burial),TrackTexel(atlas,base+b,p.y,burial),blend.x),blend.y);
         wear=max(wear,value*entry.b);
         // Empty pixels still belong to this height layer, but contain no height sample.
         if(matchHeight>.5 || packed.r==0) resident=max(resident,entry.b);
@@ -128,7 +132,7 @@ float SnowTrackTint(float wear) {
 
     return 1-.55*sqrt(saturate(wear));
 }
-float SnowCoverage(float3 p,float4 metadata,out float depth,out float retained,out float fineWear) {
+float SnowCoverage(float3 p,float4 metadata,out float depth,out float retained,out float fineWear,float sectionPlow) {
     float2 uv=(p.xz+_RoadSnowMapping.xy)*_RoadSnowMapping.zw;
     float encoded=SAMPLE_TEXTURE2D_LOD(_RoadSnowNative,s_linear_clamp_sampler,uv,0).r;
     float nativeMm=_RoadSnowPreview>.5 ? 15 : encoded*encoded*8000;
@@ -141,10 +145,23 @@ float SnowCoverage(float3 p,float4 metadata,out float depth,out float retained,o
     float threshold=.10+.75*noise;
     float coverage=smoothstep(threshold-.08,threshold+.12,fraction);
     coverage=lerp(.05*fraction,1,coverage);
-    fineWear=SnowFineWear(p);
-    float wear=max(SnowLaneWear(p),fineWear);
+    // Completed road geometry uses one camera-independent state. It does not
+    // lose clearing when a near/far history page is absent or at another LOD.
+    float cleared=saturate(sectionPlow);
+    float residue=.045*smoothstep(.72,.90,SnowNoise(p.xz*3.1));
+    float sectionWear=cleared*(1-residue);
+    [branch] if(cleared>.999) fineWear=sectionWear;
+    else fineWear=max(SnowFineWear(p),sectionWear);
+    float wear=cleared>.999 ? sectionWear : max(SnowLaneWear(p),fineWear);
     depth*=1-wear;
     return coverage*(1-wear)*smoothstep(.10,.3,max(nativeMm,retained));
+}
+float SnowCoverage(float3 p,float4 metadata,out float depth,out float retained,out float fineWear) {
+    float sectionPlow=0;
+#if defined(ROADSNOW_BANKS)
+    sectionPlow=metadata.w<0?metadata.b:0;
+#endif
+    return SnowCoverage(p,metadata,depth,retained,fineWear,sectionPlow);
 }
 float SnowCoverage(float3 p,float4 metadata,out float depth,out float retained) {
     float fineWear;
